@@ -1,0 +1,6 @@
+**
+!native/
+!native/Cargo.toml
+!native/Cargo.lock
+!native/src/
+!native/src/**

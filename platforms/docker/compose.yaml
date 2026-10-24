@@ -1,0 +1,29 @@
+# Preserve the project/data-volume name used before this directory was renamed.
+name: nas
+services:
+  lanflow:
+    build:
+      context: ../..
+      dockerfile: platforms/docker/Dockerfile
+    image: lanflow-nas:local
+    restart: unless-stopped
+    ports:
+      - "53320:53320"
+    environment:
+      LANFLOW_NAME: "我的 NAS"
+    volumes:
+      - lanflow-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+volumes:
+  lanflow-data:
