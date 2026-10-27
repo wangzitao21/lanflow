@@ -16,8 +16,8 @@ import 'package:lanflow/ui/shared/chat_theme.dart';
 import 'package:lanflow/ui/shared/profile_avatar.dart';
 import 'package:lanflow/ui/shared/app_panel.dart';
 import 'package:lanflow/ui/shared/search_text.dart';
-import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/attachment_thumbnail.dart';
+import 'message_sync_badge.dart';
 
 typedef MessageMenuCallback =
     Future<void> Function(InboxItem item, Offset position, {Rect? anchor});
@@ -38,6 +38,7 @@ class MessageTile extends StatelessWidget {
     this.showIdentity = true,
     this.showStatus = true,
     this.onQuote,
+    this.editor,
   });
 
   final InboxController inbox;
@@ -52,6 +53,7 @@ class MessageTile extends StatelessWidget {
   final VoidCallback onStatus;
   final ValueChanged<MessageQuote>? onQuote;
   final ValueChanged<String?> onSelectionChanged;
+  final Widget? editor;
 
   @override
   Widget build(BuildContext context) {
@@ -71,7 +73,9 @@ class MessageTile extends StatelessWidget {
     final peer = lan.peers[item.originId];
     final horizontalInset = ChatHistoryRowInsets.of(context);
     Widget content;
-    if (!item.isFile) {
+    if (editor != null) {
+      content = MessageBubble(outgoing: local, child: editor!);
+    } else if (!item.isFile) {
       content = MessageBubble(
         outgoing: local,
         textCursor: AppLayout.desktop(context),
@@ -110,6 +114,7 @@ class MessageTile extends StatelessWidget {
                 ? ChatMetrics.imageHeightDesktop
                 : ChatMetrics.imageHeightMobile,
             semanticLabel: item.name,
+            minExtent: 48,
           ),
         ),
       );
@@ -175,8 +180,33 @@ class MessageTile extends StatelessWidget {
         ),
       );
     }
+    content = MessageSyncBadge(
+      inbox: inbox,
+      entry: entry,
+      outgoing: local,
+      onPressed: onStatus,
+      child: KeyedSubtree(
+        key: ValueKey('inbox-item-${item.id}'),
+        child: content,
+      ),
+    );
+    if (editor == null && item.isFile && item.text.isNotEmpty) {
+      content = Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          content,
+          const SizedBox(height: 6),
+          MessageText(
+            text: item.text,
+            onLink: onLink,
+            outgoing: local,
+            selectable: AppLayout.desktop(context),
+            onSelectionChanged: onSelectionChanged,
+          ),
+        ],
+      );
+    }
     if (item.quote case final quote?) {
-      final source = inbox.store.find(quote.id)?.item;
       content = Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: local
@@ -184,13 +214,20 @@ class MessageTile extends StatelessWidget {
             : CrossAxisAlignment.start,
         children: [
           content,
-          QuotePreview(
-            quote: quote,
-            onTap: () => onQuote?.call(quote),
-            source: source,
-            image: source?.kind == MessageKind.image
-                ? inbox.store.blob(source!.digest)
-                : null,
+          AnimatedBuilder(
+            animation: inbox,
+            builder: (context, _) {
+              final source = inbox.store.find(quote.id)?.item;
+              return QuotePreview(
+                quote: quote,
+                deleted: inbox.store.deleted.contains(quote.id),
+                onTap: () => onQuote?.call(quote),
+                source: source,
+                image: source?.kind == MessageKind.image
+                    ? inbox.store.blob(source!.digest)
+                    : null,
+              );
+            },
           ),
         ],
       );
@@ -246,71 +283,25 @@ class MessageTile extends StatelessWidget {
                       ),
                     ),
                   Listener(
-                    key: ValueKey('inbox-item-${item.id}'),
                     behavior: HitTestBehavior.opaque,
                     onPointerDown: (event) {
-                      if (event.buttons == kSecondaryMouseButton) {
+                      if (editor == null &&
+                          event.buttons == kSecondaryMouseButton) {
                         unawaited(onMenu(item, event.position));
                       }
                     },
                     child: MessageHold(
-                      onHold: (position, anchor) =>
-                          onMenu(item, position, anchor: anchor),
+                      onHold: (position, anchor) {
+                        if (editor == null) {
+                          onMenu(item, position, anchor: anchor);
+                        }
+                      },
                       child: ConstrainedBox(
                         constraints: BoxConstraints(maxWidth: maxBubble),
                         child: content,
                       ),
                     ),
                   ),
-                  if (local)
-                    Padding(
-                      padding: EdgeInsets.zero,
-                      child: ValueListenableBuilder<int>(
-                        valueListenable: inbox.activity,
-                        builder: (context, _, _) {
-                          final details = inbox.copyDetails(entry);
-                          if (!showStatus &&
-                              details.every(
-                                (detail) => detail.state == CopyState.complete,
-                              )) {
-                            return const SizedBox.shrink();
-                          }
-                          final failed = details.any(
-                            (detail) => detail.state == CopyState.failed,
-                          );
-                          return TextButton.icon(
-                            key: ValueKey('copy-status-${item.id}'),
-                            onPressed: onStatus,
-                            style: TextButton.styleFrom(
-                              foregroundColor: failed
-                                  ? Theme.of(context).colorScheme.error
-                                  : muted,
-                              minimumSize: Size(
-                                0,
-                                AppLayout.desktop(context) ? 24 : 48,
-                              ),
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 6,
-                                vertical: 0,
-                              ),
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
-                            icon: Icon(
-                              failed
-                                  ? Icons.error_outline_rounded
-                                  : Icons.info_outline_rounded,
-                              size: 12,
-                            ),
-                            label: Text(
-                              tr(context, inbox.copyStatus(entry)),
-                              style: const TextStyle(
-                                fontSize: AppTypography.caption,
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-                    ),
                 ],
               ),
             );

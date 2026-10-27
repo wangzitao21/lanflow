@@ -7,7 +7,13 @@ extension _SyncRuntime on InboxController {
     // A NAS download can be the only route by which another bound device's
     // changes reach us. Forward durable unsent events, not receipt-only updates.
     for (final endpoint in endpoints.where((e) => e.key != source)) {
-      if (await _sync.hasPendingChanges(endpoint)) {
+      var pending = true;
+      try {
+        pending = await _sync.hasPendingChanges(endpoint);
+      } on Object {
+        // Scheduling another route must not turn a committed receive into failure.
+      }
+      if (pending) {
         requestSync(endpoint: endpoint.key);
       }
     }
@@ -33,6 +39,7 @@ extension _SyncRuntime on InboxController {
                   available.contains(e.key) &&
                   e.value.retryAfter != null &&
                   !(_watches.containsKey(e.key) &&
+                      _watches[e.key]?.connected != true &&
                       e.value.notificationsSupported != false &&
                       const {
                         'offline',
@@ -68,27 +75,71 @@ extension _SyncRuntime on InboxController {
         !_networkAvailable) {
       return Future.value();
     }
-    if (_running != null) {
-      if (targets != null && targets.isNotEmpty) {
-        _pendingSync.addAll(targets);
-        _syncAgain = true;
-      }
-      return _running!;
+    final waiting = <Future<void>>[];
+    for (final endpoint in endpoints.where(
+      (e) =>
+          _endpointAvailable(e) && (targets == null || targets.contains(e.key)),
+    )) {
+      final done = Completer<void>();
+      (_syncWaiters[endpoint.key] ??= []).add(done);
+      waiting.add(done.future);
+      _pendingSync.add(endpoint.key);
+      if (force) _forcedSync.add(endpoint.key);
     }
-    _progress.start();
-    final task = _syncAll(force: force, selected: targets);
-    _running = task;
-    return task.whenComplete(() {
-      _running = null;
-      _progress.stop();
-      if (_syncAgain && !_closed) {
-        _syncAgain = false;
-        if (_pendingSync.isNotEmpty) {
-          requestSync(endpoint: _pendingSync.first, immediate: true);
+    if (waiting.isEmpty) return refreshTransfers();
+    final completed = Future.wait(waiting).then<void>((_) {});
+    _pumpSync();
+    return completed;
+  }
+
+  void _pumpSync() {
+    final available = {
+      for (final e in endpoints.where(_endpointAvailable)) e.key: e,
+    };
+    for (final key in {..._pendingSync, ..._syncWaiters.keys}) {
+      if (_closed ||
+          lan.receivingPaused ||
+          !available.containsKey(key) ||
+          !_pendingSync.contains(key)) {
+        _pendingSync.remove(key);
+        _forcedSync.remove(key);
+        for (final waiter in _syncWaiters.remove(key) ?? <Completer<void>>[]) {
+          waiter.complete();
         }
       }
-      _scheduleRetry();
-    });
+    }
+    while (_syncJobs.length < 4) {
+      final key = _pendingSync
+          .where((key) => !_syncJobs.containsKey(key))
+          .firstOrNull;
+      if (key == null) break;
+      _pendingSync.remove(key);
+      final waiters = _syncWaiters.remove(key) ?? <Completer<void>>[];
+      final force = _forcedSync.remove(key);
+      final done = Completer<void>();
+      _syncJobs[key] = done.future;
+      _progress.start();
+      unawaited(() async {
+        try {
+          await _syncEndpoint(available[key]!, force: force);
+          await refreshTransfers();
+          for (final waiter in waiters) {
+            waiter.complete();
+          }
+        } on Object catch (error, stack) {
+          for (final waiter in waiters) {
+            waiter.completeError(error, stack);
+          }
+          if (waiters.isEmpty && !_closed) reportError('同步状态读取失败，请检查本机存储后重试');
+        } finally {
+          _syncJobs.remove(key);
+          done.complete();
+          _pumpSync();
+          if (_syncJobs.isEmpty) _progress.stop();
+          _scheduleRetry();
+        }
+      }());
+    }
   }
 
   void _sampleTransferProgress() {
@@ -98,120 +149,146 @@ extension _SyncRuntime on InboxController {
     unawaited(refreshTransfers().catchError((Object _) {}));
   }
 
-  Future<void> _syncAll({required bool force, Set<String>? selected}) async {
-    final targets = endpoints
-        .where(
-          (endpoint) =>
-              _endpointAvailable(endpoint) &&
-              (selected == null || selected.contains(endpoint.key)),
-        )
-        .toList();
-    // Keep one offline NAS from blocking other locations or local devices.
-    for (
-      var offset = 0;
-      offset < targets.length && !_closed && !lan.receivingPaused;
-      offset += 4
-    ) {
-      await Future.wait(
-        targets.skip(offset).take(4).map((endpoint) async {
-          if (_closed ||
-              lan.receivingPaused ||
-              !_endpointAvailable(endpoint) ||
-              !_connectionIsCurrent(endpoint, _connectionSignature(endpoint))) {
-            return;
-          }
-          final status = statuses.putIfAbsent(endpoint.key, SyncStatus.new);
-          if (!force &&
-              status.failures > 0 &&
-              status.retryAfter != null &&
-              DateTime.now().isBefore(status.retryAfter!)) {
-            return;
-          }
-          status.busy = true;
-          _activeSynchronizations++;
-          status.retryAfter = null;
-          final connection = _connectionSignature(endpoint);
-          _activityChanged();
-          try {
-            final result = await _sync.sync(endpoint);
-            if (!_connectionIsCurrent(endpoint, connection)) return;
-            status.online = true;
-            if (!endpoint.isHub) {
-              lan.peers[endpoint.id]!
-                ..online = true
-                ..lastSeen = DateTime.now();
-            }
-            status.error = result.error;
-            status.errorCategory = result.errorCategory;
-            status.needsAttention =
-                result.error != null &&
-                !const {
-                  'offline',
-                  'timeout',
-                  'busy',
-                }.contains(result.errorCategory);
-            status.lastSuccess = DateTime.now();
-            // Per-file failures have their own durable retry schedule. Keep
-            // healthy metadata and unrelated attachments moving.
-            status.failures = 0;
-            status.retryAfter = result.retryAfter;
-            if (result.more && automaticSync) {
-              _pendingSync.add(endpoint.key);
-              _syncAgain = true;
-            }
-          } on Object catch (e) {
-            // Discovery may have replaced this endpoint while its request was
-            // in flight. A stale failure must not delay the replacement.
-            if (!_connectionIsCurrent(endpoint, connection)) return;
-            if (e is NativeCoreError && e.category == 'cancelled') return;
-            status.online = _watches[endpoint.key]?.connected == true;
-            final transient =
-                e is SocketException ||
-                e is TimeoutException ||
-                (e is NativeCoreError && e.transient);
-            if (transient && !endpoint.isHub) {
-              lan.peers[endpoint.id]?.online = false;
-            }
-            status.needsAttention = !transient;
-            status.errorCategory = e is NativeCoreError
-                ? e.category
-                : transient
-                ? 'offline'
-                : 'unknown';
-            status.error =
-                e is NativeCoreError && e.category == 'authentication'
-                ? '连接已失效，请重新配对'
-                : transient
-                ? '设备离线'
-                : e is HandshakeException
-                ? '连接身份校验失败，请检查 NAS 连接码'
-                : e is StateError
-                ? e.message
-                : e is FormatException
-                ? e.message
-                : '同步未完成，可稍后重试';
-            status.failures = (status.failures + 1).clamp(1, 6);
-            var retry =
-                !(e is NativeCoreError && e.category == 'authentication');
-            if (retry) {
-              try {
-                retry = await _sync.hasPendingChanges(endpoint);
-              } on Object {
-                // A failed local read must not abandon accepted pending work.
-              }
-            }
-            if (!_connectionIsCurrent(endpoint, connection)) return;
-            status.retryAfter = retry
-                ? DateTime.now().add(syncRetryDelay(status.failures))
-                : null;
-          } finally {
-            _activeSynchronizations--;
-            status.busy = false;
-            _activityChanged();
-          }
-        }),
-      );
+  Future<void> _syncEndpoint(
+    SyncEndpoint initialEndpoint, {
+    required bool force,
+  }) async {
+    var endpoint = initialEndpoint;
+    if (_closed ||
+        lan.receivingPaused ||
+        !_endpointAvailable(endpoint) ||
+        !_connectionIsCurrent(endpoint, _connectionSignature(endpoint))) {
+      return;
     }
-    await refreshTransfers();
+    final status = statuses.putIfAbsent(endpoint.key, SyncStatus.new);
+    if (!force &&
+        status.failures > 0 &&
+        status.retryAfter != null &&
+        DateTime.now().isBefore(status.retryAfter!)) {
+      return;
+    }
+    status.busy = true;
+    _activeSynchronizations++;
+    status.retryAfter = null;
+    var connection = _connectionSignature(endpoint);
+    _activityChanged();
+    try {
+      if (!endpoint.isHub &&
+          (force ||
+              status.failures > 0 ||
+              _networkExchanged[endpoint.key] != connection)) {
+        await lan.refreshDeviceNetwork(lan.peers[endpoint.id]!);
+        final current = endpoints
+            .where((e) => e.key == endpoint.key)
+            .firstOrNull;
+        if (current == null) return;
+        endpoint = current;
+        connection = _connectionSignature(endpoint);
+        _networkExchanged[endpoint.key] = connection;
+      }
+      if (_closed || lan.receivingPaused || !_endpointAvailable(endpoint)) {
+        return;
+      }
+      final pendingPull = _pendingPulls[endpoint.key];
+      final result = await _sync.sync(endpoint, continuousFiles: automaticSync);
+      if (!_connectionIsCurrent(endpoint, connection)) return;
+      status.online = true;
+      if (!endpoint.isHub) {
+        lan.peers[endpoint.id]!
+          ..online = true
+          ..lastSeen = DateTime.now();
+      }
+      status.error = syncErrorMessage(
+        result.error,
+        result.errorCategory,
+        isHub: endpoint.isHub,
+      );
+      status.errorCategory = result.errorCategory;
+      status.needsAttention =
+          result.error != null &&
+          !retryableSyncCategories.contains(result.errorCategory);
+      status.lastSuccess = DateTime.now();
+      // Per-file failures have their own durable retry schedule. Keep
+      // healthy metadata and unrelated attachments moving.
+      status.failures = 0;
+      status.retryAfter = result.retryAfter;
+      if (!result.more && _pendingPulls[endpoint.key] == pendingPull) {
+        _pendingPulls.remove(endpoint.key);
+      }
+      if (result.more && automaticSync) {
+        _pendingSync.add(endpoint.key);
+      }
+    } on Object catch (e) {
+      if (_closed) return;
+      // Earlier metadata or another route may have committed before the
+      // connection failed or was cancelled. Publish it even when paused.
+      try {
+        final previous = store.revision;
+        await store.refresh();
+        if (store.revision != previous) {
+          await _receivedChanges(endpoint.key);
+        }
+      } on Object {
+        /* Preserve the actual synchronization failure below. */
+      }
+      // A stale/cancelled request cannot change the replacement's status.
+      if (!_connectionIsCurrent(endpoint, connection)) return;
+      if (e is NativeCoreError && e.category == 'cancelled') return;
+      final transient =
+          e is SocketException ||
+          e is TimeoutException ||
+          (e is NativeCoreError && e.transient);
+      status.needsAttention = !transient;
+      status.errorCategory = e is NativeCoreError
+          ? e.category
+          : e is HandshakeException
+          ? 'identity'
+          : e is TimeoutException
+          ? 'timeout'
+          : transient
+          ? 'offline'
+          : 'unknown';
+      status.online =
+          _watches[endpoint.key]?.connected == true ||
+          const {
+            'busy',
+            'paused',
+            'not_ready',
+            'source_pending',
+          }.contains(status.errorCategory);
+      if (!endpoint.isHub &&
+          const {'offline', 'timeout'}.contains(status.errorCategory)) {
+        lan.peers[endpoint.id]?.online = false;
+      }
+      status.error = syncErrorMessage(
+        e is StateError
+            ? e.message
+            : e is FormatException
+            ? e.message
+            : '同步未完成，可稍后重试',
+        status.errorCategory,
+        isHub: endpoint.isHub,
+      );
+      status.failures = (status.failures + 1).clamp(1, 6);
+      var retry = true;
+      try {
+        retry =
+            await _sync.hasPendingChanges(endpoint) ||
+            (_pendingPulls.containsKey(endpoint.key) &&
+                (endpoint.isHub || status.errorCategory != 'offline'));
+        // A direct peer announces/pushes when it returns. Retain its pull
+        // request without polling when we have no outgoing work.
+      } on Object {
+        // A failed local read must not abandon accepted pending work.
+      }
+      if (!_connectionIsCurrent(endpoint, connection)) return;
+      status.retryAfter = retry && transient
+          ? DateTime.now().add(syncRetryDelay(status.failures))
+          : null;
+    } finally {
+      _activeSynchronizations--;
+      status.busy = false;
+      _activityChanged();
+    }
   }
 }

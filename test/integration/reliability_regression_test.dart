@@ -177,6 +177,9 @@ void main() {
       final b = await create('unbind-b');
       await bind(a, b);
       final first = (await a.inbox.addText('first pending note'))!;
+      for (var i = 0; i < 60; i++) {
+        await a.inbox.addText('another pending note $i');
+      }
       final second = (await a.inbox.addText('second pending note'))!;
       final entered = Completer<void>();
       final release = Completer<void>();
@@ -185,7 +188,8 @@ void main() {
       var postsAfterRemoval = 0;
       var removed = false;
       b.lan.onInboxRequest = (request) async {
-        if (request.method == 'POST' && request.uri.path == '/v3/changes') {
+        if (request.method == 'POST' &&
+            request.uri.path.startsWith('/v3/changes')) {
           if (!entered.isCompleted) {
             entered.complete();
             await release.future;
@@ -204,11 +208,14 @@ void main() {
       removed = true;
       release.complete();
       await running;
-      // Cancellation now returns before this already-entered server handler.
-      // Observe its completion before checking that no later batch was sent.
+      // A body already received by the server may commit as one atomic batch.
+      // Cancellation must stop every later batch and every local acknowledgement.
       await handled.future.timeout(const Duration(seconds: 10));
       expect(a.lan.sessions.containsKey(b.lan.identity.id), isFalse);
-      expect(b.inbox.store.find(first.item.id), isNull);
+      expect(
+        a.inbox.store.find(first.item.id)!.copies,
+        isNot(contains('device:${b.lan.identity.id}')),
+      );
       expect(b.inbox.store.find(second.item.id), isNull);
       expect(postsAfterRemoval, 1);
     },

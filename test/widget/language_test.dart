@@ -229,7 +229,7 @@ void main() {
       find.text('Device identity changed. Pair it again.'),
       findsOneWidget,
     );
-    expect(find.text('Retry sync'), findsNothing);
+    expect(find.text('Retry sync'), findsOneWidget);
     expect(find.text('设置'), findsOneWidget);
     await tester.tap(find.text('Pair again'));
     expect(openedDevices, isTrue);
@@ -313,7 +313,9 @@ void main() {
       expect(find.byType(Dialog), findsOneWidget);
       await tester.tap(find.byTooltip('Close'));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const ValueKey('global-conversation-search')));
+      await tester.tap(
+        find.byKey(const ValueKey('global-conversation-search')),
+      );
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('search-filters')), findsNothing);
       expectEnglishProductCopy(tester);

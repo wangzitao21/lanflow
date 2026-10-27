@@ -250,12 +250,12 @@ void main() {
       ..online = true
       ..needsAttention = true
       ..error = '同步元数据失败';
-    expect(harness.inbox.copyStatus(entry), '已同步 1/2 · 同步失败，需处理');
+    expect(harness.inbox.copyStatus(entry), '已同步 1/2 · 连接或传输待处理');
     harness.inbox.statuses['device:$peerId'] = SyncStatus()
       ..online = true
       ..busy = true;
     await harness.mount(tester);
-    expect(find.text('已同步 1/2 · 同步中'), findsOneWidget);
+    expect(find.byKey(ValueKey('sync-badge-${entry.item.id}')), findsOneWidget);
     await tester.tap(find.byKey(ValueKey('copy-status-${entry.item.id}')));
     await tester.pumpAndSettle();
     expect(find.byType(SyncDetails), findsOneWidget);
@@ -277,6 +277,7 @@ void main() {
       findsOneWidget,
     );
     expect(find.text('连接已失效，请重新绑定'), findsOneWidget);
+    expect(find.text('重新绑定'), findsOneWidget);
     harness.inbox.statuses['device:$peerId']!.error =
         'Bad state: database error at /private/device/store.sqlite';
     harness.inbox.activity.value++;
@@ -325,8 +326,14 @@ void main() {
       expect(harness.lan.name, '我的 Windows');
       tester.view.viewInsets = const FakeViewPadding();
       await tester.pumpAndSettle();
-      await tester.scrollUntilVisible(find.byKey(const ValueKey('appearance-system')), 100,
-        scrollable: find.descendant(of: find.byKey(const PageStorageKey('preferences-form')), matching: find.byType(Scrollable)));
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('appearance-system')),
+        100,
+        scrollable: find.descendant(
+          of: find.byKey(const PageStorageKey('preferences-form')),
+          matching: find.byType(Scrollable),
+        ),
+      );
       expect(find.byKey(const ValueKey('appearance-system')), findsOneWidget);
       await tester.pumpWidget(const SizedBox.shrink());
     },

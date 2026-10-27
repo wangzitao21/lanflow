@@ -6,9 +6,9 @@ import 'package:archive/archive.dart';
 // ignore: depend_on_referenced_packages
 import 'package:file_selector_platform_interface/file_selector_platform_interface.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:lanflow/core/inbox/inbox_models.dart';
+import 'package:lanflow/core/inbox/inbox_controller.dart';
 import 'package:lanflow/core/network/models.dart';
 import 'package:lanflow/ui/chat/favorite_actions.dart';
 import 'package:lanflow/ui/chat/favorite_card.dart';
@@ -34,7 +34,7 @@ void main() {
 
   Future<void> mount(
     WidgetTester tester,
-    FavoriteUiInbox inbox, {
+    InboxController inbox, {
     ValueChanged<InboxEntry>? onLocate,
     ValueChanged<VoidCallback?>? onBackHandlerChanged,
     Size size = const Size(960, 780),
@@ -64,39 +64,25 @@ void main() {
   }
 
   testWidgets(
-    'deleted original text remains readable and copyable inside its independent favorite',
+    'a remotely deleted original vanishes from an already-open favorite detail',
     (tester) async {
-      final inbox = await installFavoriteUiInbox(tester, harness);
+      final inbox = harness.inbox;
+      late InboxEntry original;
       late FavoriteEntry favorite;
       await tester.runAsync(() async {
-        final original = (await inbox.addText(
-          '收藏中的独立原文\nhttps://example.com/notes',
-        ))!;
-        favorite = inbox.capture(original.item);
-        await inbox.deleteItem(original.item);
+        original = (await inbox.addText('Live favorite text'))!;
+        await inbox.setFavorites([original.item.id], true);
+        favorite = inbox.favoriteEntries.single;
       });
-      var located = false;
-      await mount(tester, inbox, onLocate: (_) => located = true);
+      await mount(tester, inbox);
       await tester.tap(find.byKey(ValueKey('favorite-${favorite.id}')));
       await tester.pumpAndSettle();
       expect(find.byType(FavoriteDetail), findsOneWidget);
-      expect(located, isFalse);
-      expect(
-        find.byKey(const ValueKey('favorite-detail-locate')),
-        findsNothing,
-      );
-      expect(
-        find.text(
-          'The original message was deleted. This saved copy is still available.',
-        ),
-        findsOneWidget,
-      );
-      await tester.tap(find.byKey(const ValueKey('favorite-detail-copy')));
+      await tester.runAsync(() => inbox.deleteItem(original.item));
       await tester.pumpAndSettle();
-      expect(
-        (await Clipboard.getData(Clipboard.kTextPlain))?.text,
-        favorite.item.text,
-      );
+      expect(find.text('Live favorite text'), findsNothing);
+      expect(find.byKey(const ValueKey('favorite-detail-copy')), findsNothing);
+      expect(inbox.favoriteEntries, isEmpty);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -189,7 +175,7 @@ void main() {
   );
 
   testWidgets(
-    'batch favorite deletion is independent, undoable and searchable',
+    'confirmed batch favorite deletion remains undoable and searchable',
     (tester) async {
       final inbox = await installFavoriteUiInbox(tester, harness);
       late FavoriteEntry first, second;
@@ -206,10 +192,20 @@ void main() {
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('favorites-delete-selected')));
       await tester.pumpAndSettle();
+      await tester.runAsync(() async {
+        await tester.tap(find.widgetWithText(FilledButton, 'Delete favorite'));
+        await Future<void>.delayed(const Duration(milliseconds: 100));
+      });
+      for (var i=0;i<100 && inbox.saved.isNotEmpty;i++) {
+        await tester.runAsync(()=>Future<void>.delayed(const Duration(milliseconds:20)));
+        await tester.pump();
+      }
+      await tester.pumpAndSettle();
       expect(inbox.saved, isEmpty);
-      expect(inbox.items.length, 2);
+      expect(inbox.items, isEmpty);
       expect(find.byType(AlertDialog), findsNothing);
-      await tester.tap(find.text('Undo'));
+      expect(find.byType(SnackBar), findsNothing);
+      await inbox.restoreFavorites([first.id, second.id]);
       await tester.pumpAndSettle();
       expect(inbox.saved.map((entry) => entry.id).toSet(), {
         first.id,
@@ -243,7 +239,7 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('favorite-detail-delete')));
       await tester.pumpAndSettle();
       expect(inbox.deleteCalls, 0);
-      expect(find.textContaining('Linked deletion is enabled'), findsOneWidget);
+      expect(find.textContaining('This deletes the message'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(inbox.deleteCalls, 0);

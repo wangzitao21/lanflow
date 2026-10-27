@@ -21,14 +21,15 @@ String userError(Object? error, {required String fallback}) {
       if (message.startsWith(entry.key)) return entry.value;
     }
   }
-  if (error is SocketException) return '连接失败，请检查网络';
-  if (error is TimeoutException) return '连接超时，请重试';
+  if (error is SocketException) return '离线';
+  if (error is TimeoutException) return '离线';
   if (error is HandshakeException) return '无法验证设备，请重新绑定';
   if (error is FileSystemException) return '无法读写文件，请检查存储空间和权限';
   return fallback;
 }
 
 const _operationErrors = <String, String>{
+  '会话顺序保存失败：': '会话顺序未保存，请重试',
   '草稿保存失败：': '草稿未保存，请重试',
   '本地记录保存失败：': '聊天记录未保存，请检查存储空间',
   '收件箱加载失败：': '无法打开聊天记录，请重试',
@@ -42,6 +43,37 @@ const _operationErrors = <String, String>{
 };
 
 const _messages = <String, String>{
+  '离线': '离线',
+  '冲突版本已更新，请重新查看后选择': '冲突版本已更新，请重新查看后选择',
+  '请先选择或编辑这条消息的冲突版本': '请先选择或编辑这条消息的冲突版本',
+  '消息内容不能为空': '消息内容不能为空',
+  '文件名不能为空': '文件名不能为空',
+  '设备已移除': '设备已移除',
+  '此 NAS 已在列表中': '此 NAS 已在列表中',
+  '设备名称最多 60 个字': '设备名称最多 60 个字',
+  '连接不到设备，请确认对方已打开 LanFlow 且网络可达': '离线',
+  '连接不到 NAS，请检查 NAS 地址和网络': '连接不到 NAS，请检查 NAS 地址和网络',
+  '连接超时，稍后自动重试': '连接超时，稍后自动重试',
+  '对方暂时忙，稍后自动重试': '对方暂时忙，稍后自动重试',
+  '对方已暂停同步，恢复后会继续': '对方已暂停同步，恢复后会继续',
+  '对方正在准备同步，稍后自动重试': '对方正在准备同步，稍后自动重试',
+  '设备身份校验失败，请确认设备地址或重新绑定': '设备身份校验失败，请确认设备地址或重新绑定',
+  '本机存储读写失败，请检查剩余空间和权限': '本机存储读写失败，请检查剩余空间和权限',
+  '对方存储读写失败，请检查对方的剩余空间和权限': '对方存储读写失败，请检查对方的剩余空间和权限',
+  '对方的同步响应无效或版本不兼容，请更新两端 LanFlow': '对方的同步响应无效或版本不兼容，请更新两端 LanFlow',
+  '同步记录不一致，原内容已保留，请检查两端版本': '同步记录不一致，原内容已保留，请检查两端版本',
+  '附件校验未通过，正在重新传输': '附件校验未通过，正在重新传输',
+  '当前网络无法连接此设备，请检查网络后重试': '当前网络无法连接此设备，请检查网络后重试',
+  '同步状态读取失败，请检查本机存储后重试': '同步状态读取失败，请检查本机存储后重试',
+  'File checksum mismatch': '附件校验未通过，正在重新传输',
+  'Remote file checksum mismatch': '附件校验未通过，正在重新传输',
+  'Local file is incomplete': '本机附件尚未完整，等待自动补齐',
+  'File is not complete': '附件尚未完整，等待自动补齐',
+  '等待附件来源设备上线': '等待附件来源设备上线',
+  '消息已删除，无法修改': '消息已删除，无法修改',
+  'Change ID conflicts with existing content': '同步记录不一致，请重试；原内容已保留',
+  'Message ID conflicts with existing content': '同步记录不一致，请重试；原内容已保留',
+  'Invalid message length': '内容超过长度限制，请缩短后保存',
   '附件内容已改变，请重新导入原文件': '附件内容已改变，请重新导入原文件',
   '附件整理校验失败，原文件已保留': '附件校验失败，原文件已保留，请重新导入',
   'An image is already being prepared': '正在处理剪贴板图片，请稍候',

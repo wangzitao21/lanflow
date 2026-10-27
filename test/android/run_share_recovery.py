@@ -87,8 +87,10 @@ subprocess.run([
     '-classpath', os.pathsep.join([stdlib, annotations]), '-d', str(output),
     str(android / 'app/src/main/kotlin/dev/lanflow/app/ShareRecovery.kt'),
     str(android / 'app/src/main/kotlin/dev/lanflow/app/DiscoveryWindow.kt'),
+    str(android / 'app/src/main/kotlin/dev/lanflow/app/ReceiverActivityPolicy.kt'),
     str(project / 'test/android/share_recovery_test.kt'),
     str(project / 'test/android/discovery_window_test.kt'),
+    str(project / 'test/android/receiver_activity_test.kt'),
 ], check=True)
-for entry in ('Share_recovery_testKt', 'Discovery_window_testKt'):
+for entry in ('Share_recovery_testKt', 'Discovery_window_testKt', 'Receiver_activity_testKt'):
     subprocess.run(['java', '-cp', os.pathsep.join([str(output), stdlib]), f'dev.lanflow.app.{entry}'], check=True)

@@ -47,14 +47,14 @@ void main() {
         reason: 'Explicit unread marks remain until reopening',
       );
       await pc.inbox.setConversationPinned(work.id, true);
-      await pc.inbox.setConversationBackground(work.id, 0xFFDCE7F3);
+      await pc.inbox.setConversationAvatar(work.id, 'book', color:0xFFDCE7F3);
       expect(pc.inbox.conversations.first.id, work.id);
       await pc.close();
       pc.inbox.dispose();
       pc.lan.dispose();
       pc = await TestDevice.create('${root.path}/pc', '电脑');
       expect(pc.inbox.isUnread(work.id), isTrue);
-      expect(pc.inbox.store.preference(work.id).background, 0xFFDCE7F3);
+      expect(pc.inbox.conversationAvatarColor(work.id), 0xFFDCE7F3);
       expect(pc.inbox.conversations.first.id, work.id);
       pc.inbox.selectConversation(work.id);
       expect(pc.inbox.isUnread(work.id), isFalse);

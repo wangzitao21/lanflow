@@ -1,6 +1,10 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'chat_theme.dart';
 import 'app_strings.dart';
+
+final _messageTokens = Expando<Object>();
 
 void showAppMessage(
   BuildContext context,
@@ -8,22 +12,31 @@ void showAppMessage(
   SnackBarAction? action,
   Duration? duration,
 }) {
-  ScaffoldMessenger.of(context)
+  final messenger = ScaffoldMessenger.of(context);
+  final lifetime = duration == null || duration > const Duration(seconds: 1)
+      ? const Duration(seconds: 1)
+      : duration;
+  final token = Object();
+  _messageTokens[messenger] = token;
+  messenger
+    ..removeCurrentSnackBar()
     ..clearSnackBars()
     ..showSnackBar(
       SnackBar(
-        content: Text(tr(context, message)),
+        content: TransientNotice(
+          key: UniqueKey(),
+          duration: lifetime,
+          onDismiss: () {
+            if (messenger.mounted &&
+                identical(_messageTokens[messenger], token)) {
+              messenger.removeCurrentSnackBar();
+            }
+          },
+          child: Text(tr(context, message)),
+        ),
         action: action,
         persist: false,
-        duration:
-            duration ??
-            (message.contains('已删除') ||
-                    message.contains('已移至回收站') ||
-                    message.contains('已移入回收站')
-                ? const Duration(seconds: 1)
-                : action == null
-                ? const Duration(milliseconds: 1500)
-                : const Duration(milliseconds: 2500)),
+        duration: lifetime,
         behavior: SnackBarBehavior.floating,
         margin: EdgeInsets.fromLTRB(
           12,
@@ -35,7 +48,48 @@ void showAppMessage(
               : 12,
         ),
       ),
+      snackBarAnimationStyle: AnimationStyle.noAnimation,
     );
+}
+
+class TransientNotice extends StatefulWidget {
+  const TransientNotice({
+    super.key,
+    required this.child,
+    this.onDismiss,
+    this.duration = const Duration(seconds: 1),
+  });
+  final Widget child;
+  final VoidCallback? onDismiss;
+  final Duration duration;
+
+  @override
+  State<TransientNotice> createState() => _TransientNoticeState();
+}
+
+class _TransientNoticeState extends State<TransientNotice> {
+  Timer? _timer;
+  bool _visible = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _timer = Timer(widget.duration, () {
+      if (!mounted) return;
+      setState(() => _visible = false);
+      widget.onDismiss?.call();
+    });
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) =>
+      _visible ? widget.child : const SizedBox.shrink();
 }
 
 class AppStatusMessage extends StatelessWidget {
@@ -44,7 +98,11 @@ class AppStatusMessage extends StatelessWidget {
   final bool error;
 
   @override
-  Widget build(BuildContext context) => Padding(
+  Widget build(BuildContext context) => error
+      ? _content(context)
+      : TransientNotice(key: ValueKey(message), child: _content(context));
+
+  Widget _content(BuildContext context) => Padding(
     padding: const EdgeInsets.only(bottom: AppSpacing.small),
     child: Semantics(
       liveRegion: true,

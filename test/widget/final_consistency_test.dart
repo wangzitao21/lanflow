@@ -191,7 +191,7 @@ void main() {
         find.byKey(ValueKey('copy-status-${entries[0].item.id}')),
         findsOneWidget,
       );
-      expect(find.text('已同步 0/1 · 同步失败，需处理'), findsOneWidget);
+      expect(find.text('已同步 0/1 · 连接或传输待处理'), findsNothing);
       expect(
         find.byKey(ValueKey('copy-status-${entries[1].item.id}')),
         findsOneWidget,

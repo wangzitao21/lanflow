@@ -15,14 +15,17 @@ class QuotePreview extends StatelessWidget {
     this.mobile = false,
     this.source,
     this.image,
+    this.deleted = false,
   });
   final MessageQuote quote;
   final VoidCallback? onClose, onTap;
   final bool draft, mobile;
   final InboxItem? source;
   final File? image;
+  final bool deleted;
 
   String _summary(BuildContext context) {
+    if (deleted) return tr(context, '原消息已删除');
     if (source?.isFile == true) {
       return switch (source!.kind) {
         MessageKind.image => '[${tr(context, '图片')}]',
@@ -35,7 +38,7 @@ class QuotePreview extends StatelessWidget {
     if (quote.text.startsWith('[file] ')) {
       return '[${tr(context, '文件')}] ${quote.text.substring(7)}';
     }
-    return quote.text.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return (source?.text ?? quote.text).replaceAll(RegExp(r'\s+'), ' ').trim();
   }
 
   @override

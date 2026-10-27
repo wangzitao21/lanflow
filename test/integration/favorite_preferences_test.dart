@@ -159,7 +159,7 @@ void main() {
         a = await TestDevice.create('${root.path}/a', 'Preference owner');
         aDisposed = false;
         expect(a.inbox.favoritePreferences, expected);
-        expect(a.inbox.favoriteEntries.length, 2);
+        expect(a.inbox.favoriteEntries.length, 1);
         await a.inbox.setFavoritesPinned([ids.first], false);
         expect(a.inbox.favoritePreferences.pinned.keys, [ids.last]);
         expect(a.inbox.favoritePreferences.layout, 'list');

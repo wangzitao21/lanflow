@@ -10,7 +10,7 @@ import 'conversation_avatar.dart';
 import 'package:lanflow/ui/shared/chat_theme.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 
-class ConversationList extends StatelessWidget {
+class ConversationList extends StatefulWidget {
   const ConversationList({
     super.key,
     required this.inbox,
@@ -23,6 +23,55 @@ class ConversationList extends StatelessWidget {
   final ValueChanged<String> onOpen;
   final Future<void> Function(String? id, Offset position, {Rect? anchor})
   onMenu;
+
+  @override
+  State<ConversationList> createState() => _ConversationListState();
+}
+
+class _ConversationListState extends State<ConversationList> {
+  String? _draggedId;
+  InboxController get inbox => widget.inbox;
+  bool get mobile => widget.mobile;
+  ValueChanged<String> get onOpen => widget.onOpen;
+  Future<void> Function(String? id, Offset position, {Rect? anchor})
+  get onMenu => widget.onMenu;
+
+  Widget _buildList(
+    List<Conversation> conversations, {
+    required IndexedWidgetBuilder itemBuilder,
+  }) {
+    if (mobile) {
+      return ListView.builder(
+        key: const PageStorageKey('conversation-list-scroll'),
+        padding: EdgeInsets.zero,
+        itemCount: conversations.length,
+        itemBuilder: itemBuilder,
+      );
+    }
+    return ReorderableListView.builder(
+      key: const PageStorageKey('conversation-list-scroll'),
+      padding: EdgeInsets.zero,
+      itemCount: conversations.length,
+      buildDefaultDragHandles: false,
+      onReorderStart: (index) => _draggedId = conversations[index].id,
+      onReorderItem: (oldIndex, newIndex) {
+        final id = _draggedId ?? conversations[oldIndex].id;
+        _draggedId = null;
+        unawaited(
+          inbox
+              .reorderConversation(id, newIndex)
+              .catchError(
+                (Object error) => inbox.reportError('会话顺序保存失败：$error'),
+              ),
+        );
+      },
+      itemBuilder: (context, index) => ReorderableDragStartListener(
+        key: ValueKey('conversation-row-${conversations[index].id}'),
+        index: index,
+        child: itemBuilder(context, index),
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) => ValueListenableBuilder<int>(
@@ -45,10 +94,8 @@ class ConversationList extends StatelessWidget {
                 style: TextStyle(color: palette.muted),
               ),
             )
-          : ListView.builder(
-              key: const PageStorageKey('conversation-list-scroll'),
-              padding: EdgeInsets.zero,
-              itemCount: conversations.length,
+          : _buildList(
+              conversations,
               itemBuilder: (context, index) {
                 final conversation = conversations[index];
                 final preference = inbox.store.preference(conversation.id);
@@ -87,9 +134,6 @@ class ConversationList extends StatelessWidget {
                     : '${time.month}/${time.day}';
                 final selected =
                     !mobile && inbox.conversationId == conversation.id;
-                final background = palette.conversationColor(
-                  preference.background,
-                );
                 final unread = inbox.unreadCount(conversation.id);
                 final unreadLabel = unread > 99
                     ? '99+'
@@ -105,7 +149,7 @@ class ConversationList extends StatelessWidget {
                     child: Semantics(
                       selected: selected,
                       child: Material(
-                        color: background,
+                        color: selected ? palette.selected : palette.surface,
                         child: Stack(
                           children: [
                             InkWell(
@@ -123,7 +167,8 @@ class ConversationList extends StatelessWidget {
                                       children: [
                                         ConversationAvatar(
                                           id: conversation.id,
-                                          avatar: preference.avatar,
+                                          avatar: conversation.avatar,
+                                          color: conversation.avatarColor,
                                         ),
                                         if (preference.manualUnread ||
                                             unread > 0)

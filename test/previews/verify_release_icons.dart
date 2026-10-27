@@ -6,10 +6,25 @@ import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+String _sharedFlutterRoot() {
+  final environment = Platform.environment;
+  if (environment['FLUTTER_ROOT'] case final String root) return root;
+  if (Platform.isWindows) {
+    final tools =
+        environment['WINDOWS_BUILD_TOOLS_HOME'] ??
+        '${environment['USERPROFILE']}/Documents/BuildTools';
+    return '$tools/flutter';
+  }
+  final tools =
+      environment['DEVTOOLS_HOME'] ??
+      '${environment['HOME']}/.local/share/dev-tools';
+  return '$tools/flutter';
+}
+
 Map<String, int> _usedIcons() {
   final sdkIcons = File(
     Platform.environment['LANFLOW_MATERIAL_ICONS_SOURCE'] ??
-        '.tooling/flutter/packages/flutter/lib/src/material/icons.dart',
+        '${_sharedFlutterRoot()}/packages/flutter/lib/src/material/icons.dart',
   ).readAsStringSync();
   final definitions = {
     for (final match in RegExp(
@@ -102,6 +117,7 @@ void main() {
   testWidgets('published icon font paints navigation and action glyphs', (
     tester,
   ) async {
+    late Set<int> used;
     final path =
         Platform.environment['LANFLOW_RELEASE_ICON_FONT'] ??
         'build/windows/x64/runner/Release/data/flutter_assets/fonts/MaterialIcons-Regular.otf';
@@ -116,7 +132,9 @@ void main() {
         ..addFont(font.readAsBytes().then(ByteData.sublistView));
       await loader.load();
       final available = _fontCodepoints(await font.readAsBytes());
-      for (final icon in _usedIcons().entries) {
+      final icons = _usedIcons();
+      used = icons.values.toSet();
+      for (final icon in icons.entries) {
         expect(
           available.contains(icon.value),
           isTrue,
@@ -130,21 +148,7 @@ void main() {
     addTearDown(tester.view.resetPhysicalSize);
     addTearDown(tester.view.resetDevicePixelRatio);
     final key = GlobalKey();
-    for (final icon in [
-      Icons.chat_bubble_outline,
-      Icons.chat_bubble_outline_rounded,
-      Icons.restore_from_trash_outlined,
-      Icons.palette_outlined,
-      Icons.push_pin,
-      Icons.push_pin_outlined,
-      Icons.mark_chat_read_outlined,
-      Icons.mark_chat_unread_outlined,
-      Icons.info_outline_rounded,
-      Icons.error_outline_rounded,
-      Icons.folder_off_outlined,
-      Icons.refresh_rounded,
-      Icons.notes_rounded,
-    ]) {
+    for (final codePoint in used.toList()..sort()) {
       await tester.pumpWidget(
         Directionality(
           textDirection: TextDirection.ltr,
@@ -154,7 +158,7 @@ void main() {
               color: Colors.black,
               child: Center(
                 child: Text(
-                  String.fromCharCode(icon.codePoint),
+                  String.fromCharCode(codePoint),
                   style: const TextStyle(
                     fontFamily: 'LanFlowPublishedIcons',
                     color: Colors.white,
@@ -185,7 +189,7 @@ void main() {
         painted,
         greaterThan(20),
         reason:
-            'Published icon U+${icon.codePoint.toRadixString(16)} is blank.',
+            'Published icon U+${codePoint.toRadixString(16)} is blank.',
       );
     }
     await tester.pumpWidget(const SizedBox.shrink());

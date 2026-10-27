@@ -7,6 +7,7 @@ import 'package:lanflow/ui/shared/app_panel.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/inbox_labels.dart';
+import 'message_conflict_tile.dart';
 
 class SyncDetails extends StatelessWidget {
   const SyncDetails({
@@ -26,10 +27,11 @@ class SyncDetails extends StatelessWidget {
     animation: Listenable.merge([inbox, inbox.activity]),
     builder: (context, _) {
       final details = inbox.copyDetails(entry);
+      final conflict = inbox.conflictFor(entry.item.id);
       return AppPanel(
         title: '同步详情',
         width: 480,
-        height: 380,
+        height: conflict == null ? 380 : 600,
         actions: [
           TextButton(onPressed: onDevices, child: Text(tr(context, '我的设备'))),
           if (details.isNotEmpty)
@@ -47,8 +49,11 @@ class SyncDetails extends StatelessWidget {
               style: Theme.of(context).textTheme.titleMedium,
             ),
             const SizedBox(height: 20),
+            if (conflict != null)
+              MessageConflictTile(inbox: inbox, conflict: conflict),
             if (details.isEmpty) Text(tr(context, '暂无已绑定设备')),
-            for (final detail in details)
+            for (final detail
+                in conflict == null ? details : <TargetCopyStatus>[])
               if (detail.state == CopyState.failed)
                 SyncIssueTile(
                   key: ValueKey(detail.target.key),

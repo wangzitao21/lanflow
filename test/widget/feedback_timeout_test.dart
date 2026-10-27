@@ -18,7 +18,7 @@ void main() {
   }
 
   testWidgets(
-    'favorite delete compacts the layout, toast expires, and Undo still restores',
+    'favorite delete compacts the layout silently and the recycle bin retains recovery',
     (tester) async {
       await tester.runAsync(() async {
         final first = (await harness.inbox.addText('第一项收藏'))!;
@@ -33,12 +33,14 @@ void main() {
         find.byKey(ValueKey('favorite-$first')),
       );
       await tester.tap(find.byKey(ValueKey('favorite-delete-$first')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除收藏'));
       await settleUntil(
         tester,
         () => harness.inbox.favoriteEntries.length == 1,
       );
-      expect(find.text('已删除 1 项收藏'), findsOneWidget);
-      expect(harness.inbox.items, hasLength(2));
+      expect(find.byType(SnackBar), findsNothing);
+      expect(harness.inbox.items, hasLength(1));
       final remaining = harness.inbox.favoriteEntries.single.id;
       expect(
         tester.getTopLeft(find.byKey(ValueKey('favorite-$remaining'))),
@@ -50,15 +52,17 @@ void main() {
       expect(harness.inbox.favoriteEntries, hasLength(1));
 
       await tester.tap(find.byKey(ValueKey('favorite-delete-$remaining')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.widgetWithText(FilledButton, '删除收藏'));
       await settleUntil(tester, () => harness.inbox.favoriteEntries.isEmpty);
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.tap(find.text('撤销'));
+      expect(find.byType(SnackBar), findsNothing);
+      await tester.runAsync(() => harness.inbox.restoreFavorites([remaining]));
       await settleUntil(
         tester,
         () => harness.inbox.favoriteEntries.length == 1,
       );
-      expect(harness.inbox.favoriteEntries.single.id, remaining);
-      expect(harness.inbox.items, hasLength(2));
+      expect(harness.inbox.favoriteEntries.single.id, isNot(remaining));
+      expect(harness.inbox.items, hasLength(1));
       await tester.pump(const Duration(seconds: 3));
       await tester.pumpAndSettle();
       expect(find.byType(SnackBar), findsNothing);

@@ -26,6 +26,8 @@ pub(super) fn runtime() -> Result<&'static tokio::runtime::Runtime> {
 struct Control {
     cancelled: AtomicBool,
     claimed: AtomicBool,
+    in_files: AtomicBool,
+    yield_files: AtomicBool,
     mutations: Mutex<()>,
     waiting: Mutex<Option<Waker>>,
 }
@@ -55,6 +57,8 @@ pub(super) fn begin(root: &Path, key: &str) -> Result<String> {
             Arc::new(Control {
                 cancelled: AtomicBool::new(false),
                 claimed: AtomicBool::new(false),
+                in_files: AtomicBool::new(false),
+                yield_files: AtomicBool::new(false),
                 mutations: Mutex::new(()),
                 waiting: Mutex::new(None),
             }),
@@ -82,6 +86,50 @@ pub(super) fn cancel(root: &Path, key: Option<&str>) {
     }
 }
 
+pub(super) fn interrupt_files(root: &Path, key: &str, run_id: &str) -> bool {
+    let Ok(runs) = RUNS.get_or_init(Default::default).lock() else {
+        return false;
+    };
+    let Some((current, control)) = runs.get(&(root.to_owned(), key.to_owned())) else {
+        return false;
+    };
+    if current != run_id {
+        return false;
+    }
+    control.yield_files.store(true, Ordering::Release);
+    if control.in_files.load(Ordering::Acquire) {
+        let _guard = control
+            .mutations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        control.cancel();
+        return true;
+    }
+    false
+}
+
+pub(super) fn file_activity(root: &Path) -> usize {
+    RUNS.get_or_init(Default::default)
+        .lock()
+        .map(|runs| {
+            runs.iter()
+                .filter(|((path, _), (_, control))| {
+                    path == root
+                        && control.in_files.load(Ordering::Acquire)
+                        && !control.cancelled.load(Ordering::Acquire)
+                })
+                .count()
+        })
+        .unwrap_or(0)
+}
+
+pub(super) struct FilePhase<'a>(&'a Control);
+impl Drop for FilePhase<'_> {
+    fn drop(&mut self) {
+        self.0.in_files.store(false, Ordering::Release);
+    }
+}
+
 pub(super) struct Run {
     control: Arc<Control>,
     key: (PathBuf, String),
@@ -89,6 +137,14 @@ pub(super) struct Run {
     idle_timeout: Duration,
 }
 impl Run {
+    pub fn file_phase(&self) -> Result<FilePhase<'_>> {
+        self.control.in_files.store(true, Ordering::Release);
+        if self.control.yield_files.load(Ordering::Acquire) {
+            self.control.cancel();
+        }
+        self.check()?;
+        Ok(FilePhase(&self.control))
+    }
     pub fn acquire(root: &Path, key: &str, id: &str) -> Result<Self> {
         let runs = RUNS
             .get_or_init(Default::default)

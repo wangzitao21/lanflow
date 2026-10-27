@@ -2,21 +2,50 @@ use super::*;
 
 const CONVERSATION: &str = "COALESCE(json_extract(body,'$.conversationId'),'lanflow-self-chat')";
 
+pub(super) fn schema(db: &Connection) -> Result<()> {
+    let existed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='history_totals')",
+        [],
+        |r| r.get(0),
+    )?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS history_totals(conversation TEXT PRIMARY KEY,count INTEGER NOT NULL,maximum INTEGER NOT NULL);")?;
+    if !existed {
+        db.execute(&format!("INSERT INTO history_totals SELECT {CONVERSATION},COUNT(*),MAX(sequence) FROM items WHERE json_valid(body) GROUP BY {CONVERSATION}"), [])?;
+    }
+    let old = "COALESCE(json_extract(OLD.body,'$.conversationId'),'lanflow-self-chat')";
+    let new = "COALESCE(json_extract(NEW.body,'$.conversationId'),'lanflow-self-chat')";
+    let add = format!(
+        "INSERT INTO history_totals VALUES({new},1,NEW.sequence) ON CONFLICT(conversation) DO UPDATE SET count=count+1,maximum=MAX(maximum,NEW.sequence);"
+    );
+    let remove = format!(
+        "UPDATE history_totals SET count=count-1,maximum=CASE WHEN maximum=OLD.sequence THEN COALESCE((SELECT sequence FROM items INDEXED BY items_conversation_sequence WHERE json_valid(body) AND {CONVERSATION}={old} ORDER BY sequence DESC LIMIT 1),0) ELSE maximum END WHERE conversation={old};"
+    );
+    db.execute_batch(&format!("
+        CREATE TRIGGER IF NOT EXISTS history_total_insert AFTER INSERT ON items WHEN json_valid(NEW.body) BEGIN {add} END;
+        CREATE TRIGGER IF NOT EXISTS history_total_delete AFTER DELETE ON items WHEN json_valid(OLD.body) BEGIN {remove} END;
+        CREATE TRIGGER IF NOT EXISTS history_total_update AFTER UPDATE ON items WHEN json_valid(OLD.body) AND json_valid(NEW.body) AND ({old}!={new} OR OLD.sequence!=NEW.sequence) BEGIN {remove} {add} END;
+    "))?;
+    Ok(())
+}
+
 pub(super) fn summaries(db: &Connection, after: Option<i64>) -> Result<Value> {
     let ids: Vec<String> = if let Some(after) = after {
         db.prepare("SELECT id FROM state_changes WHERE kind='history' AND revision>?")?
             .query_map([after], |r| r.get(0))?
             .collect::<std::result::Result<_, _>>()?
     } else {
-        db.prepare(&format!("SELECT {CONVERSATION} FROM items INDEXED BY items_conversation_sequence WHERE json_valid(body) GROUP BY {CONVERSATION}"))?
-            .query_map([], |r| r.get(0))?.collect::<std::result::Result<_, _>>()?
+        db.prepare("SELECT conversation FROM history_totals WHERE count>0")?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?
     };
     let mut result = serde_json::Map::new();
-    let mut count = db.prepare(&format!("SELECT count(*),COALESCE(MAX(sequence),0) FROM items INDEXED BY items_conversation_sequence WHERE json_valid(body) AND {CONVERSATION}=?"))?;
+    let mut count = db.prepare("SELECT count,maximum FROM history_totals WHERE conversation=?")?;
     let mut latest = db.prepare(&format!("SELECT sequence,body FROM items INDEXED BY items_conversation_date WHERE json_valid(body) AND {CONVERSATION}=? ORDER BY julianday(json_extract(body,'$.createdAt')) DESC,id DESC LIMIT 1"))?;
     for id in ids {
-        let (count, maximum): (i64, i64) =
-            count.query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        let (count, maximum): (i64, i64) = count
+            .query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))
+            .optional()?
+            .unwrap_or((0, 0));
         let last: Option<(i64, String)> = latest
             .query_row([&id], |r| Ok((r.get(0)?, r.get(1)?)))
             .optional()?;

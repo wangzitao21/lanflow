@@ -140,81 +140,52 @@ void main() {
   );
 
   testWidgets(
-    'linked deletion is configurable and the main recycle bin restores each copy independently',
+    'deletion has one recycle-bin record and restores the message with its favorite',
     (tester) async {
-      late String messageId, favoriteId;
+      late InboxEntry entry;
+      late String favoriteId;
       await tester.runAsync(() async {
-        final entry = await harness.inbox.addText('两份内容分别恢复');
-        messageId = entry!.item.id;
-        await harness.inbox.setFavorites([messageId], true);
+        entry = (await harness.inbox.addText('One shared message'))!;
+        await harness.inbox.setFavorites([entry.item.id], true);
         favoriteId = harness.inbox.favoriteEntries.single.id;
       });
-      expect(harness.inbox.linkFavoriteDeletion, isFalse);
+      expect(harness.inbox.linkFavoriteDeletion, isTrue);
       await harness.mount(tester);
       await tester.tap(find.byTooltip('设置'));
       await tester.pumpAndSettle();
-      final toggle = find.byKey(const ValueKey('link-favorite-deletion'));
-      await tester.scrollUntilVisible(
-        toggle,
-        120,
-        scrollable: find.descendant(
-          of: find.byKey(const PageStorageKey('preferences-form')),
-          matching: find.byType(Scrollable),
-        ),
+      expect(
+        find.byKey(const ValueKey('link-favorite-deletion')),
+        findsNothing,
       );
-      await tester.tap(toggle);
-      for (var i = 0; i < 100; i++) {
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)),
-        );
-        await tester.pump();
-        if (harness.inbox.linkFavoriteDeletion) break;
-      }
-      await tester.pumpAndSettle();
-      expect(harness.inbox.linkFavoriteDeletion, isTrue);
       await tester.tap(find.byTooltip('关闭'));
       await tester.pumpAndSettle();
       await tester.runAsync(() => harness.inbox.deleteFavorites([favoriteId]));
       expect(harness.inbox.items, isEmpty);
       expect(harness.inbox.favoriteEntries, isEmpty);
       await tester.tap(find.byKey(const ValueKey('desktop-nav-trash')));
-      Future<void> waitForRestore(String id) async {
-        for (var i = 0; i < 100; i++) {
-          await tester.runAsync(
-            () => Future<void>.delayed(const Duration(milliseconds: 20)),
-          );
-          await tester.pump();
-          if (find.byKey(ValueKey('restore-$id')).evaluate().isNotEmpty) break;
-        }
-        await tester.pumpAndSettle();
-      }
-
-      await waitForRestore(favoriteId);
-      expect(find.byType(AlertDialog), findsNothing);
-      expect(find.byKey(ValueKey('restore-$messageId')), findsOneWidget);
-      await tester.tap(find.byKey(ValueKey('restore-$favoriteId')));
-      for (var i = 0; i < 100 && harness.inbox.favoriteEntries.isEmpty; i++) {
+      for (
+        var i = 0;
+        i < 100 &&
+            find.byKey(ValueKey('restore-${entry.item.id}')).evaluate().isEmpty;
+        i++
+      ) {
         await tester.runAsync(
           () => Future<void>.delayed(const Duration(milliseconds: 20)),
         );
         await tester.pump();
       }
       await tester.pumpAndSettle();
-      expect(harness.inbox.favoriteEntries, hasLength(1));
-      expect(harness.inbox.items, isEmpty);
-      expect(find.text('已恢复到收藏'), findsOneWidget);
-      await waitForRestore(messageId);
-      await tester.tap(find.byKey(ValueKey('restore-$messageId')));
-      for (var i = 0; i < 100 && harness.inbox.items.isEmpty; i++) {
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 20)),
-        );
-        await tester.pump();
-      }
+      expect(find.byKey(ValueKey('restore-$favoriteId')), findsNothing);
+      await tester.tap(find.byKey(ValueKey('restore-${entry.item.id}')));
+      await tester.runAsync(
+        () => harness.waitFor(() => harness.inbox.items.isNotEmpty),
+      );
       await tester.pumpAndSettle();
-      expect(harness.inbox.items.single.item.text, '两份内容分别恢复');
-      expect(harness.inbox.favoriteEntries, hasLength(1));
-      expect(find.text('已恢复到原会话'), findsOneWidget);
+      expect(harness.inbox.items.single.item.text, 'One shared message');
+      expect(
+        harness.inbox.favoriteEntries.single.originalMessageId,
+        harness.inbox.items.single.item.id,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },

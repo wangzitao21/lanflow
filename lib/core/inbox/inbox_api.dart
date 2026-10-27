@@ -42,6 +42,12 @@ class InboxApi {
 
   Future<void> handle(HttpRequest request) async {
     final route = request.uri.path;
+    if (route == '/v3/deletions' && request.method == 'GET') {
+      final after = int.tryParse(request.uri.queryParameters['after'] ?? '0');
+      if (after == null || after < 0) throw const FormatException('同步位置无效');
+      await inboxReply(request, 200, await store.deletions(after));
+      return;
+    }
     if (route == '/v3/watch' && request.method == 'GET') {
       final after = int.tryParse(request.uri.queryParameters['after'] ?? '-1');
       if (after == null || after < -1) throw const FormatException('同步位置无效');
@@ -71,28 +77,46 @@ class InboxApi {
       );
       return;
     }
-    if (route == '/v3/changes' && request.method == 'POST') {
-      final event = await readInboxJson(request, limit: 1024 * 1024);
+    if ((route == '/v3/changes' || route == '/v3/changes/batch') &&
+        request.method == 'POST') {
+      final batch = route.endsWith('/batch');
+      final body = await readInboxJson(request, limit: 1024 * 1024);
+      if (batch &&
+          (body['events'] is! List ||
+              (body['events'] as List).isEmpty ||
+              (body['events'] as List).length > 50)) {
+        throw const FormatException('同步批次无效');
+      }
+      final events = batch
+          ? (body['events'] as List)
+                .map((v) => Map<String, dynamic>.from(v as Map))
+                .toList()
+          : [body];
       final sender = request.headers.value('X-Lanflow-Device');
-      if (sender != null &&
-          event['type'] == 'item' &&
-          event['item'] is Map &&
-          event['item']['kind'] != 'text' &&
-          await store.transferBlocked(
-            'device:$sender',
-            event['item']['sha256'] as String? ?? '',
-          )) {
-        await inboxReply(request, 409, {'error': '此附件已在本机暂停或取消'});
-        return;
+      for (final event in events) {
+        if (sender != null &&
+            event['type'] == 'item' &&
+            event['item'] is Map &&
+            event['item']['kind'] != 'text' &&
+            await store.transferBlocked(
+              'device:$sender',
+              event['item']['sha256'] as String? ?? '',
+            )) {
+          await inboxReply(request, 409, {'error': '此附件已在本机暂停或取消'});
+          return;
+        }
       }
       final previousCursor = store.changeCursor;
-      final changed = await store.applyChange(
-        event,
-        source: sender == null ? null : 'device:$sender',
-      );
+      final source = sender == null ? null : 'device:$sender';
+      final changed = batch
+          ? await store.applyChanges(events, source: source)
+          : await store.applyChange(body, source: source);
       if (changed) onChange();
       if (store.changeCursor != previousCursor) onContentChange?.call();
-      await inboxReply(request, 200, {'ok': true});
+      await inboxReply(request, 200, {
+        'ok': true,
+        if (batch) 'ids': events.map((e) => e['id']).toList(),
+      });
       return;
     }
     if (route == '/v2/items' && request.method == 'GET') {

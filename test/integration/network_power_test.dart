@@ -43,7 +43,7 @@ void main() {
         await Future<void>.delayed(const Duration(milliseconds: 250));
         sender.inbox.setForeground(false);
         receiver.inbox.setForeground(false);
-        peer.address = '192.168.50.2';
+        sender.lan.peers[peer.id]!.address = '192.168.50.2';
         sender.inbox.setNetworkState(
           const NetworkState(
             fingerprint: 'cellular',
@@ -57,7 +57,7 @@ void main() {
         expect(receiver.inbox.store.find(waiting.item.id), isNull);
         expect(sender.inbox.transferring, isFalse);
         expect(sender.inbox.statuses.values.single.failures, 0);
-        peer.address = '127.0.0.1';
+        sender.lan.peers[peer.id]!.address = '127.0.0.1';
         final resume = Stopwatch()..start();
         sender.inbox.setNetworkState(
           const NetworkState(fingerprint: 'wifi', localNetworkAvailable: true),

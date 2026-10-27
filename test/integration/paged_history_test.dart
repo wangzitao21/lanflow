@@ -97,15 +97,14 @@ void main() {
         await store.removeConversation(defaultConversationId);
         expect(store.messageCount, 0);
         expect(await store.conversationIds(defaultConversationId), isEmpty);
-        expect(store.favoriteEntries, hasLength(1));
-        expect(store.originalExists(store.favoriteEntries.single), isFalse);
+        expect(store.favoriteEntries, isEmpty);
         expect((await store.deletedPage())['total'], 1205);
         await store.close();
         final reopened = InboxStore(root);
         active = reopened;
         await reopened.load();
         expect(reopened.entries, isEmpty);
-        expect(reopened.favoriteEntries, hasLength(1));
+        expect(reopened.favoriteEntries, isEmpty);
       } finally {
         await active?.close();
         final boundary = await Directory.systemTemp.resolveSymbolicLinks();

@@ -16,7 +16,14 @@ class NativeCoreError extends StateError {
   NativeCoreError(super.message, this.status, [this.category = 'unknown']);
   final int status;
   final String category;
-  bool get transient => const {'offline', 'timeout', 'busy'}.contains(category);
+  bool get transient => const {
+    'offline',
+    'timeout',
+    'busy',
+    'source_pending',
+    'paused',
+    'not_ready',
+  }.contains(category);
 }
 
 class _Library {
@@ -112,8 +119,10 @@ class NativeCore {
           'storage_stats',
           'clear_preview_cache',
           'cancel_sync',
+          'interrupt_sync_transfer',
           'search_messages',
           'apply',
+          'apply_batch',
         }.contains(request['op'])) {
       // Network and large file work never hold up the storage worker or UI.
       return Isolate.run(() => _invoke(request));

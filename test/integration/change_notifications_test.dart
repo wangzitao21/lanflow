@@ -105,6 +105,7 @@ void main() {
         'second',
         automaticSync: true,
       );
+      var secondDisposed = false;
       try {
         second.lan.onPrompt = (_) async => true;
         final peer = await first.lan.addAddress(
@@ -121,6 +122,7 @@ void main() {
         await second.close();
         second.inbox.dispose();
         second.lan.dispose();
+        secondDisposed = true;
         first.inbox.requestSync();
         await waitUntil(
           () =>
@@ -146,6 +148,7 @@ void main() {
           'second',
           automaticSync: true,
         );
+        secondDisposed = false;
         await waitUntil(() => second.inbox.store.find(missed.item.id) != null);
         expect(second.inbox.store.find(before.item.id), isNotNull);
       } finally {
@@ -153,8 +156,10 @@ void main() {
         await second.close();
         first.inbox.dispose();
         first.lan.dispose();
-        second.inbox.dispose();
-        second.lan.dispose();
+        if (!secondDisposed) {
+          second.inbox.dispose();
+          second.lan.dispose();
+        }
         await root.delete(recursive: true);
       }
     },

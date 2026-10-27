@@ -21,7 +21,7 @@ Future<void> waitForStorage(WidgetTester tester, bool Function() done) async {
 void main() {
   final harness = WidgetTestHarness();
   testWidgets(
-    'desktop selects several messages, confirms once, deletes exactly those and restores with Undo',
+    'desktop selects several messages, confirms once and deletes silently with recycle bin recovery',
     (tester) async {
       final messages = <InboxEntry>[];
       await tester.runAsync(() async {
@@ -51,7 +51,12 @@ void main() {
       await waitForStorage(tester, () => harness.inbox.items.length == 1);
       expect(harness.inbox.items.single.item.id, messages[2].item.id);
       expect(tester.widget<TextField>(editor).controller!.text, '未发送草稿');
-      await tester.tap(find.text('撤销'));
+      expect(find.byType(SnackBar), findsNothing);
+      await tester.runAsync(() async {
+        for (final entry in messages.take(2)) {
+          await harness.inbox.restoreItem(entry.item);
+        }
+      });
       await waitForStorage(tester, () => harness.inbox.items.length == 3);
       expect(harness.inbox.items.map((e) => e.item.text).toSet(), {
         '选择测试 0',

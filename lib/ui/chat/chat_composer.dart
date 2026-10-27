@@ -61,6 +61,7 @@ class ChatComposer extends StatelessWidget {
     final source = inbox.store.find(quote.id)?.item;
     return QuotePreview(
       quote: quote,
+      deleted: inbox.store.deleted.contains(quote.id),
       draft: true,
       mobile: mobile,
       onClose: onCancelQuote,
@@ -230,8 +231,10 @@ class ChatComposer extends StatelessWidget {
           if (AppLayout.desktop(context))
             const SingleActivator(LogicalKeyboardKey.numpadEnter, shift: true):
                 onNewline,
-          const SingleActivator(LogicalKeyboardKey.enter, control: true): () =>
-              unawaited(onSend()),
+          const SingleActivator(LogicalKeyboardKey.enter, control: true):
+              onNewline,
+          const SingleActivator(LogicalKeyboardKey.numpadEnter, control: true):
+              onNewline,
           if (Theme.of(context).platform == TargetPlatform.windows)
             const SingleActivator(LogicalKeyboardKey.keyV, control: true): () =>
                 unawaited(onPaste()),
@@ -439,7 +442,7 @@ class ChatComposer extends StatelessWidget {
                       message: tr(
                         context,
                         AppLayout.desktop(context)
-                            ? 'Enter 发送，Shift+Enter 换行'
+                            ? 'Enter 发送，Ctrl+Enter 或 Shift+Enter 换行'
                             : '发送（Ctrl+Enter）',
                       ),
                       child: _sendButton(context, desktop: true),
@@ -516,7 +519,7 @@ class ChatComposer extends StatelessWidget {
                       message: tr(
                         context,
                         AppLayout.desktop(context)
-                            ? 'Enter 发送，Shift+Enter 换行'
+                            ? 'Enter 发送，Ctrl+Enter 或 Shift+Enter 换行'
                             : '发送',
                       ),
                       child: SizedBox(

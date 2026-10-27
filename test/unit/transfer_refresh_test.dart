@@ -17,6 +17,19 @@ class _TransferReadStore extends InboxStore {
     reads.add(read);
     return read.future;
   }
+
+  @override
+  Future<Map<String, dynamic>> transferUpdates(
+    Set<String> endpoints,
+    int after, {
+    int? initialThrough,
+  }) async => {
+    'items': await transfers(),
+    'removed': <String>[],
+    'reset': true,
+    'cursor': 0,
+    'more': false,
+  };
 }
 
 void main() {

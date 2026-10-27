@@ -217,6 +217,9 @@ class _RecoveryInboxStore extends InboxStore {
     conversationPreferences
       ..clear()
       ..addAll(previous.conversationPreferences);
+    conversationOrder
+      ..clear()
+      ..addAll(previous.conversationOrder);
     currentConversation = previous.currentConversation;
     composerFraction = previous.composerFraction;
     readBaseline = previous.readBaseline;

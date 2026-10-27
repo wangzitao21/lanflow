@@ -11,6 +11,8 @@ pub mod hub;
 mod layout;
 mod maintenance;
 mod maintenance_gc;
+mod message_edits;
+mod reconciliation;
 mod search;
 mod short_search;
 mod storage;
@@ -112,6 +114,10 @@ mod blob_tests;
 mod bootstrap_tests;
 #[cfg(test)]
 mod favorite_snapshot_tests;
+#[cfg(test)]
+mod message_edit_tests;
+#[cfg(test)]
+mod optimization_tests;
 #[cfg(test)]
 mod storage_behavior_tests;
 #[cfg(test)]

@@ -15,6 +15,20 @@ database = root / "system" / "messages.sqlite3"
 if not database.is_file():
     raise FileNotFoundError("Initialize the real application schema first")
 connection = sqlite3.connect(database)
+def short_grams(body):
+    value = json.loads(body)
+    terms = set()
+    for field in ("text", "name"):
+        text = value.get(field, "").translate(str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ", "abcdefghijklmnopqrstuvwxyz"))
+        for segment in text.split("\0"):
+            for i, char in enumerate(segment):
+                if ord(char) > 127:
+                    terms.add("s" + char.encode().hex())
+                if i and (ord(segment[i - 1]) > 127 or ord(char) > 127):
+                    terms.add("s" + segment[i - 1:i + 1].encode().hex())
+    return " ".join(sorted(terms))
+
+connection.create_function("lanflow_short_grams", 1, short_grams, deterministic=True)
 if connection.execute("SELECT count(*) FROM items").fetchone()[0]:
     raise ValueError("The benchmark fixture must start with an empty database")
 

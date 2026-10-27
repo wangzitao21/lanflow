@@ -15,6 +15,8 @@ import 'package:lanflow/ui/shared/app_dialogs.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/inbox_labels.dart';
+import 'sync_connection_editor.dart';
+import 'device_avatar_editor.dart';
 
 class DeviceDialogs {
   DeviceDialogs({
@@ -57,6 +59,7 @@ class DeviceDialogs {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(tr(context, '仅绑定自己的设备，绑定后将共享全部聊天内容。')),
+                    Text(tr(context, '绑定后自动连接彼此已绑定的设备，全部内容会自动同步。')),
                     SizedBox(height: 20),
                     Text(tr(context, '核对另一台设备上的验证码')),
                     SelectableText(
@@ -87,7 +90,7 @@ class DeviceDialogs {
     return result.future;
   }
 
-  Future<void> _bind(Peer peer) async {
+  Future<void> _bind(Peer peer, {bool repair = false}) async {
     var busy = false;
     String? error;
     await showDialog<void>(
@@ -103,6 +106,7 @@ class DeviceDialogs {
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(tr(context, '绑定后将共享全部聊天内容，请核对验证码。')),
+                Text(tr(context, '绑定后自动连接彼此已绑定的设备，全部内容会自动同步。')),
                 SizedBox(height: 18),
                 SelectableText(
                   verificationCode(lan.identity.fingerprint, peer.fingerprint),
@@ -141,7 +145,7 @@ class DeviceDialogs {
                           error = null;
                         });
                         try {
-                          await lan.connect(peer);
+                          await lan.connect(peer, rePair: repair);
                           inbox.requestSync();
                           if (context.mounted) Navigator.pop(context);
                         } on Object catch (e) {
@@ -366,16 +370,7 @@ class DeviceDialogs {
 
   String _deviceStatus(String key) {
     final status = inbox.statuses[key];
-    final message = status?.error ?? '';
-    if (message.contains('配对') ||
-        message.contains('已失效') ||
-        message.contains('身份')) {
-      return '连接已失效，可移除后重新绑定';
-    }
-    final label = _status(status);
-    return status?.notificationsSupported == false
-        ? '$label · 更新对端后可自动接收变化通知'
-        : label;
+    return _status(status);
   }
 
   Future<void> show() => showDialog<void>(
@@ -538,7 +533,16 @@ class _DevicePanelState extends State<DevicePanel> with WidgetsBindingObserver {
               ),
             ListTile(
               contentPadding: EdgeInsets.zero,
-              leading: ProfileAvatar(inbox: inbox, local: true),
+              leading: InkWell(
+                key: ValueKey('edit-device-avatar-${lan.identity.id}'),
+                onTap: () => editDeviceAvatar(
+                  context,
+                  inbox,
+                  lan.identity.id,
+                  platform: Theme.of(context).platform.name.toLowerCase(),
+                ),
+                child: ProfileAvatar(inbox: inbox, local: true),
+              ),
               title: Text(
                 tr(context, '{name}（本机）', {
                   'name': lan.name.isEmpty ? tr(context, '本机') : lan.name,
@@ -566,20 +570,58 @@ class _DevicePanelState extends State<DevicePanel> with WidgetsBindingObserver {
             for (final id in lan.sessions.keys)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: ProfileAvatar(
-                  inbox: inbox,
-                  local: false,
-                  deviceId: id,
-                  platform: lan.peers[id]?.platform,
+                leading: InkWell(
+                  key: ValueKey('edit-device-avatar-$id'),
+                  onTap: () => editDeviceAvatar(
+                    context,
+                    inbox,
+                    id,
+                    platform: lan.peers[id]?.platform,
+                  ),
+                  child: ProfileAvatar(
+                    inbox: inbox,
+                    local: false,
+                    deviceId: id,
+                    platform: lan.peers[id]?.platform,
+                  ),
                 ),
                 title: Text(endpointLabel(context, inbox, 'device:$id')),
-                subtitle: Text(
-                  tr(context, dialogs._deviceStatus('device:$id')),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(tr(context, dialogs._deviceStatus('device:$id'))),
+                  ],
                 ),
-                trailing: removeButton(
-                  'device:$id',
-                  endpointLabel(context, inbox, 'device:$id'),
-                  () => inbox.removeDevice(id),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: ValueKey('configure-device:$id'),
+                      tooltip: tr(context, '重新设置'),
+                      onPressed: () => showSyncConnectionEditor(
+                        context,
+                        inbox,
+                        SyncTarget(
+                          'device:$id',
+                          endpointLabel(context, inbox, 'device:$id'),
+                        ),
+                      ),
+                      icon: const Icon(Icons.settings_outlined),
+                    ),
+                    if (inbox.statuses['device:$id']?.errorCategory ==
+                            'authentication' &&
+                        lan.peers[id] != null)
+                      TextButton(
+                        onPressed: () =>
+                            dialogs._bind(lan.peers[id]!, repair: true),
+                        child: Text(tr(context, '重新绑定')),
+                      ),
+                    removeButton(
+                      'device:$id',
+                      endpointLabel(context, inbox, 'device:$id'),
+                      () => inbox.removeDevice(id),
+                    ),
+                  ],
                 ),
               ),
             const Divider(height: 24),
@@ -671,15 +713,45 @@ class _DevicePanelState extends State<DevicePanel> with WidgetsBindingObserver {
             for (final hub in inbox.store.hubs)
               ListTile(
                 contentPadding: EdgeInsets.zero,
-                leading: Icon(Icons.dns_outlined, color: muted),
-                title: Text(hub.name),
-                subtitle: Text(
-                  '${hub.url.host}:${hub.url.port}\n${tr(context, dialogs._deviceStatus(hub.key))}',
+                leading: InkWell(
+                  key: ValueKey('edit-device-avatar-${hub.id}'),
+                  onTap: () => editDeviceAvatar(
+                    context,
+                    inbox,
+                    hub.id,
+                    platform: 'linux',
+                  ),
+                  child: ProfileAvatar(
+                    inbox: inbox,
+                    local: false,
+                    deviceId: hub.id,
+                    platform: 'linux',
+                  ),
                 ),
-                trailing: removeButton(
-                  hub.key,
-                  hub.name,
-                  () => inbox.removeHub(hub),
+                title: Text(hub.name),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${hub.url.host}:${hub.url.port}\n${tr(context, dialogs._deviceStatus(hub.key))}',
+                    ),
+                  ],
+                ),
+                trailing: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    IconButton(
+                      key: ValueKey('configure-${hub.key}'),
+                      tooltip: tr(context, '重新设置'),
+                      onPressed: () => showSyncConnectionEditor(
+                        context,
+                        inbox,
+                        SyncTarget(hub.key, hub.name, isHub: true),
+                      ),
+                      icon: const Icon(Icons.settings_outlined),
+                    ),
+                    removeButton(hub.key, hub.name, () => inbox.removeHub(hub)),
+                  ],
                 ),
               ),
             Align(

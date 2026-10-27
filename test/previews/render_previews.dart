@@ -81,10 +81,10 @@ void main() {
       work = await harness.inbox.createConversation('工作');
       await harness.inbox.addText('本周项目资料，回到办公室继续处理。');
       await harness.inbox.setConversationPinned(work.id, true);
-      await harness.inbox.setConversationBackground(work.id, 0xFFDCE7F3);
+      await harness.inbox.setConversationAvatar(work.id, 'book', color:0xFFDCE7F3);
       final ideas = await harness.inbox.createConversation('灵感');
       await harness.inbox.addText('把随手想到的事情放在这里。');
-      await harness.inbox.setConversationBackground(ideas.id, 0xFFE6E0F0);
+      await harness.inbox.setConversationAvatar(ideas.id, 'star', color:0xFFE6E0F0);
       await harness.inbox.setConversationUnread(ideas.id, true);
       harness.inbox.relocateStorage = (_, _) async {};
       harness.inbox.selectConversation(defaultConversationId);

@@ -268,21 +268,29 @@ async fn dispatch(
                 // replies. Hyper drops this future when its socket closes.
                 let _ = changes.changed().await;
             } else {
-                let hold = wait.and_then(|v| v.parse::<u64>().ok()).unwrap_or(25).clamp(5, 120);
+                let hold = wait
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(25)
+                    .clamp(5, 120);
                 let _ = tokio::time::timeout(Duration::from_secs(hold), changes.changed()).await;
             }
         }
         let cursor = *changes.borrow_and_update();
-        return Ok(reply(200, json!({"cursor":cursor,"changed":cursor!=after,"waitForChange":true})));
+        return Ok(reply(
+            200,
+            json!({"cursor":cursor,"changed":cursor!=after,"waitForChange":true}),
+        ));
     }
-    if method == "GET" && matches!(path.as_str(), "/v3/changes" | "/v2/items") {
+    if method == "GET" && matches!(path.as_str(), "/v3/changes" | "/v2/items" | "/v3/deletions") {
         let after = query(&request, "after")?
             .unwrap_or_else(|| "0".into())
             .parse::<i64>()?;
         let capabilities = json!(query(&request, "capabilities")?);
         let value = tokio::task::spawn_blocking(move || -> Result<Value> {
             let db = hub.db.lock().map_err(|_| "Database unavailable")?;
-            if path == "/v3/changes" {
+            if path == "/v3/deletions" {
+                reconciliation::deletion_page(&db, after)
+            } else if path == "/v3/changes" {
                 storage::requested_page(&db, after, &capabilities)
             } else {
                 storage::items_page(&db, after)
@@ -290,6 +298,32 @@ async fn dispatch(
         })
         .await??;
         return Ok(reply(200, value));
+    }
+    if method == "POST" && path == "/v3/changes/batch" {
+        let value = read_json(request).await?;
+        let ids = events::batch_events(&value["events"])?
+            .iter()
+            .map(|e| e["id"].clone())
+            .collect::<Vec<_>>();
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let mut attachment_changed = false;
+            for event in events::batch_events(&value["events"])? {
+                if let Some(item) = events::transfer_item(event) {
+                    validate_item(item)?;
+                    attachment_changed |=
+                        attachments::register_changed(&hub.root, &hub.db, item)?.1;
+                }
+            }
+            let mut db = hub.db.lock().map_err(|_| "Database unavailable")?;
+            if events::apply_batch(&hub.root, &mut db, &value["events"], None)?
+                || attachment_changed
+            {
+                hub.changes.send_replace(storage::change_cursor(&db)?);
+            }
+            Ok(())
+        })
+        .await??;
+        return Ok(reply(200, json!({"ok":true,"ids":ids})));
     }
     if method == "POST" && matches!(path.as_str(), "/v3/changes" | "/v2/items") {
         let value = read_json(request).await?;

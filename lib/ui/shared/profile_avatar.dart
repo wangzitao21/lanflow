@@ -31,9 +31,10 @@ class ProfileAvatar extends StatelessWidget {
       size: size,
       local: local,
       image: inbox.deviceAvatar(id),
+      preset: inbox.deviceAvatarPreset(id),
+      color: inbox.deviceAvatarColor(id),
       name: inbox.lan.identityReady ? deviceLabel(context, inbox, id) : '',
-      platform:
-          platform ?? (local && Platform.isAndroid ? 'android' : 'windows'),
+      platform: platform ?? (local ? Platform.operatingSystem : 'windows'),
     );
   }
 }

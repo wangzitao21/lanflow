@@ -68,19 +68,28 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets('devices and transfers are available inside settings, recovery stays on home', (tester) async {
-    await harness.mount(tester);
-    expect(find.byKey(const ValueKey('desktop-nav-transfers')), findsNothing);
-    await harness.openSettingsPage(tester, 'transfers');
-    expect(find.byType(TransferDialog), findsOneWidget);
-    expect(find.byType(SettingsPanel), findsOneWidget);
-    expect(find.byKey(const ValueKey('settings-page-storage')), findsOneWidget);
-    expect(find.byKey(const ValueKey('settings-page-devices')), findsOneWidget);
-    await harness.closeSettings(tester);
-    expect(find.byKey(const ValueKey('desktop-nav-trash')), findsOneWidget);
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+  testWidgets(
+    'devices and transfers are available inside settings, recovery stays on home',
+    (tester) async {
+      await harness.mount(tester);
+      expect(find.byKey(const ValueKey('desktop-nav-transfers')), findsNothing);
+      await harness.openSettingsPage(tester, 'transfers');
+      expect(find.byType(TransferDialog), findsOneWidget);
+      expect(find.byType(SettingsPanel), findsOneWidget);
+      expect(
+        find.byKey(const ValueKey('settings-page-storage')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('settings-page-devices')),
+        findsOneWidget,
+      );
+      await harness.closeSettings(tester);
+      expect(find.byKey(const ValueKey('desktop-nav-trash')), findsOneWidget);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets(
     'search scopes match literal keywords in text and filenames and retain results on return',
@@ -134,6 +143,26 @@ void main() {
       await tester.tap(find.byKey(const ValueKey('search-scope-all')));
       await tester.pumpAndSettle();
       expect(find.text('3 条匹配消息'), findsOneWidget);
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(ValueKey('search-conversation-${local.item.id}')),
+            )
+            .data,
+        '发给自己',
+      );
+      expect(
+        tester
+            .widget<Text>(
+              find.byKey(ValueKey('search-conversation-${remote.item.id}')),
+            )
+            .data,
+        '工作',
+      );
+      final row = tester.widget<ListTile>(
+        find.byKey(ValueKey('search-result-${remote.item.id}')),
+      );
+      expect(row.title, isA<Column>());
       await tester.tap(find.byKey(ValueKey('search-result-${remote.item.id}')));
       await tester.pumpAndSettle();
       expect(harness.inbox.conversation.name, '工作');
@@ -315,8 +344,19 @@ void main() {
       await tester.binding.handlePopRoute();
       await tester.pumpAndSettle();
       expect(find.byType(MessageSearchPanel), findsOneWidget);
-      expect(find.byKey(const ValueKey('located-message-highlight')), findsNothing);
-      expect(tester.widget<TextField>(find.byKey(const ValueKey('global-conversation-search'))).controller!.text, isEmpty);
+      expect(
+        find.byKey(const ValueKey('located-message-highlight')),
+        findsNothing,
+      );
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const ValueKey('global-conversation-search')),
+            )
+            .controller!
+            .text,
+        isEmpty,
+      );
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -351,8 +391,6 @@ void main() {
             },
         ],
       });
-      harness.inbox.store.preference(work).background = 0xFFDCE7F3;
-      harness.inbox.store.preference(ideas).background = 0xFFE6E0F0;
       harness.inbox.appearance.value = 'dark';
       await harness.mount(tester);
       final palette = ChatPalette.of(
@@ -370,11 +408,7 @@ void main() {
           .color!;
       final blue = rowColor(work);
       final purple = rowColor(ideas);
-      expect(HSLColor.fromColor(blue).saturation, greaterThan(.4));
-      expect(
-        (HSLColor.fromColor(blue).hue - HSLColor.fromColor(purple).hue).abs(),
-        greaterThan(35),
-      );
+      expect(blue, purple);
       for (final background in [blue, purple]) {
         expect(
           (palette.text.computeLuminance() + .05) /

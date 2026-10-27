@@ -33,34 +33,41 @@ class RuntimeFeedback extends StatelessWidget {
             left: AppSpacing.large,
             right: AppSpacing.large,
             bottom: AppSpacing.large,
-            child: SafeArea(
-              child: Material(
-                key: const ValueKey('runtime-notice'),
-                elevation: 4,
-                color: palette.surface,
-                shape: RoundedRectangleBorder(
-                  borderRadius: AppCorners.border,
-                  side: BorderSide(color: palette.divider),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
-                  child: Row(
-                    children: [
-                      Expanded(
-                        child: Semantics(
-                          liveRegion: true,
-                          child: Text(
-                            tr(context, notice!),
-                            style: Theme.of(context).textTheme.bodyMedium,
+            child: TransientNotice(
+              key: ValueKey(notice),
+              onDismiss: onDismiss,
+              child: SafeArea(
+                child: Material(
+                  key: const ValueKey('runtime-notice'),
+                  elevation: 4,
+                  color: palette.surface,
+                  shape: RoundedRectangleBorder(
+                    borderRadius: AppCorners.border,
+                    side: BorderSide(color: palette.divider),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+                    child: Row(
+                      children: [
+                        Expanded(
+                          child: Semantics(
+                            liveRegion: true,
+                            child: Text(
+                              tr(context, notice!),
+                              style: Theme.of(context).textTheme.bodyMedium,
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: AppSpacing.small),
-                      TextButton(
-                        onPressed: onDismiss,
-                        child: Text(tr(context, '知道了')),
-                      ),
-                    ],
+                        const SizedBox(width: AppSpacing.small),
+                        Semantics(
+                          label: tr(context, '关闭'),
+                          child: IconButton(
+                            onPressed: onDismiss,
+                            icon: const Icon(Icons.close, size: 18),
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),

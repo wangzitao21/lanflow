@@ -2,26 +2,51 @@ use super::*;
 
 // Hex-encoded one/two-character terms preserve literal substring semantics,
 // including punctuation. Only non-ASCII terms need this supplementary index.
-fn grams(body: &str) -> String {
-    format!(
-        "(WITH RECURSIVE source(text) AS (
-        SELECT CAST(lower(COALESCE(json_extract({body},'$.text'),'')) AS BLOB) UNION ALL
-        SELECT CAST(lower(COALESCE(json_extract({body},'$.name'),'')) AS BLOB)),
-        segments(text,rest) AS (
-          SELECT CAST(CASE WHEN instr(text,x'00')=0 THEN text ELSE substr(text,1,instr(text,x'00')-1) END AS TEXT),
-            CASE WHEN instr(text,x'00')=0 THEN x'' ELSE substr(text,instr(text,x'00')+1) END FROM source
-          UNION ALL
-          SELECT CAST(CASE WHEN instr(rest,x'00')=0 THEN rest ELSE substr(rest,1,instr(rest,x'00')-1) END AS TEXT),
-            CASE WHEN instr(rest,x'00')=0 THEN x'' ELSE substr(rest,instr(rest,x'00')+1) END FROM segments WHERE length(rest)>0),
-        chars(text,n) AS (
-          SELECT text,1 FROM segments WHERE length(CAST(text AS BLOB))!=length(text)
-          UNION ALL SELECT text,n+1 FROM chars WHERE n<length(text)),
-        grams(term) AS (
-          SELECT 's'||hex(substr(text,n,1)) FROM chars WHERE unicode(substr(text,n,1))>127
-          UNION SELECT 's'||hex(substr(text,n,2)) FROM chars WHERE n<length(text)
-          AND (unicode(substr(text,n,1))>127 OR unicode(substr(text,n+1,1))>127))
-        SELECT COALESCE(group_concat(term,' '),'') FROM grams)"
-    )
+fn grams(body: &Value) -> String {
+    let mut terms = std::collections::HashSet::new();
+    for field in ["text", "name"] {
+        let text = body[field].as_str().unwrap_or("");
+        if text.is_ascii() {
+            continue;
+        }
+        let mut previous = None;
+        for ch in text.chars().map(|ch| ch.to_ascii_lowercase()) {
+            if ch == '\0' {
+                previous = None;
+                continue;
+            }
+            if !ch.is_ascii() {
+                terms.insert(format!("s{}", hex::encode(ch.to_string())));
+            }
+            if let Some(before) = previous {
+                if !char::is_ascii(&before) || !ch.is_ascii() {
+                    terms.insert(format!("s{}", hex::encode(format!("{before}{ch}"))));
+                }
+            }
+            previous = Some(ch);
+        }
+    }
+    let mut terms: Vec<_> = terms.into_iter().collect();
+    terms.sort_unstable();
+    terms.join(" ")
+}
+
+pub(super) fn register(db: &Connection) -> Result<()> {
+    use rusqlite::functions::FunctionFlags;
+    db.create_scalar_function(
+        "lanflow_short_grams",
+        1,
+        FunctionFlags::SQLITE_UTF8
+            | FunctionFlags::SQLITE_DETERMINISTIC
+            | FunctionFlags::SQLITE_INNOCUOUS,
+        |context| {
+            let body: String = context.get(0)?;
+            let body: Value = serde_json::from_str(&body)
+                .map_err(|error| rusqlite::Error::UserFunctionError(Box::new(error)))?;
+            Ok(grams(&body))
+        },
+    )?;
+    Ok(())
 }
 
 pub(super) fn query(query: &str) -> Option<String> {
@@ -54,7 +79,7 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
     // Direct row deletion avoids regenerating every substring during bulk
     // deletion and needs no second stored copy of the text/term strings.
     db.execute_batch("CREATE VIRTUAL TABLE IF NOT EXISTS message_short_search USING fts5(grams,content='',contentless_delete=1,detail=none);")?;
-    let new = grams("NEW.body");
+    let new = "lanflow_short_grams(NEW.body)";
     for (name, action, row) in [
         ("INSERT", "AFTER INSERT", "NEW"),
         ("DELETE", "AFTER DELETE", "OLD"),
@@ -121,7 +146,7 @@ pub(super) fn step(db: &mut Connection, limit: i64) -> Result<Value> {
     let rows = tx.prepare("SELECT document_id FROM message_search_documents WHERE document_id>? AND document_id<=? ORDER BY document_id LIMIT ?")?
         .query_map(params![after,upper,limit.clamp(1,256)], |r|r.get::<_,i64>(0))?.collect::<std::result::Result<Vec<_>,_>>()?;
     let next = rows.last().copied().unwrap_or(upper);
-    let terms = grams("i.body");
+    let terms = "lanflow_short_grams(i.body)";
     tx.execute(&format!("INSERT OR REPLACE INTO message_short_search(rowid,grams) SELECT d.document_id,{terms} FROM message_search_documents d JOIN items i ON i.id=d.item_id WHERE d.document_id>? AND d.document_id<=? AND json_valid(i.body)"),params![after,next])?;
     let done = next >= upper || rows.len() < limit.clamp(1, 256) as usize;
     if done {

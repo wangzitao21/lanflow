@@ -40,8 +40,9 @@ fn references(db: &Connection) -> Result<HashSet<String>> {
         }
     }
     // Paused, retrying and cancelled jobs can still be resumed by the user.
-    // Only completed history is no longer an active reference.
-    let mut jobs = db.prepare("SELECT body FROM transfer_jobs WHERE state!='completed'")?;
+    // Removed tasks are only suppression records; they do not pin partial data.
+    let mut jobs =
+        db.prepare("SELECT body FROM transfer_jobs WHERE state NOT IN ('completed','dismissed')")?;
     for body in jobs.query_map([], |row| row.get::<_, String>(0))? {
         let event: Value = serde_json::from_str(&body?)?;
         if let Some(item) = events::transfer_item(&event) {
@@ -69,8 +70,9 @@ fn temporary_candidates(
     referenced: &HashSet<String>,
 ) -> Result<Vec<PathBuf>> {
     let mut downloads = HashSet::new();
-    let mut jobs =
-        db.prepare("SELECT endpoint,body FROM transfer_jobs WHERE state!='completed'")?;
+    let mut jobs = db.prepare(
+        "SELECT endpoint,body FROM transfer_jobs WHERE state NOT IN ('completed','dismissed')",
+    )?;
     for row in jobs.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))? {
         let (endpoint, body) = row?;
         let event: Value = serde_json::from_str(&body)?;
@@ -364,6 +366,36 @@ mod tests {
         fs::remove_file(source).unwrap();
         json!({"id":uuid::Uuid::new_v4().simple().to_string(),"originId":"a".repeat(32),"originName":"本机",
             "createdAt":now(),"kind":"file","text":"","name":name,"size":bytes.len(),"sha256":stored["sha256"]})
+    }
+
+    #[test]
+    fn removed_downloads_do_not_keep_partial_files_alive_during_cleanup() {
+        let root = crate::tests::root();
+        initialize(&root).unwrap();
+        let hash = digest(b"complete payload");
+        let item = json!({"id":"removed-file-item","originId":"removed-file-owner","originName":"Device","createdAt":now(),"kind":"file","text":"","name":"removed.bin","size":16,"sha256":hash});
+        let event = item_event(&item);
+        {
+            let shared = database(&root).unwrap();
+            let db = shared.lock().unwrap();
+            transfers::enqueue(
+                &db,
+                "device:offline",
+                "download",
+                &json!({"sequence":1,"event":event}),
+            )
+            .unwrap();
+            transfers::action(&db,&json!({"endpoint":"device:offline","direction":"download","eventId":event["id"],"action":"delete"})).unwrap();
+        }
+        let partial = layout::incoming(&root).join(format!(
+            "download-{}.part",
+            digest(format!("device:offline:{hash}").as_bytes())
+        ));
+        fs::write(&partial, b"partial").unwrap();
+        dispatch(json!({"op":"close","root":root})).unwrap();
+        cleanup(&root, false).unwrap();
+        assert!(!partial.exists());
+        crate::tests::cleanup(&root);
     }
 
     #[test]

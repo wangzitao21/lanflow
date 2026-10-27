@@ -153,6 +153,202 @@ fn empty_page(capable: bool) -> Value {
     json!({"items":[],"cursor":0,"more":false,"protocol":3,"capabilities":if capable { vec!["favorites"] } else { Vec::<&str>::new() }})
 }
 
+fn database_peer(root: &Path) -> Peer {
+    let root = root.to_owned();
+    Peer::start(move |request| {
+        let result = (|| -> Result<Value> {
+            let shared=database(&root)?;
+            let mut db=shared.lock().unwrap();
+            let uri=reqwest::Url::parse(&format!("https://localhost{}",request.path))?;
+            let after=uri.query_pairs().find(|(key,_)| key=="after").map(|(_,value)| value.parse::<i64>()).transpose()?.unwrap_or(0);
+            if request.method=="POST" {
+                if uri.path()=="/v3/changes/batch" {
+                    events::apply_batch(&root,&mut db,&request.body["events"],Some("device:client"))?;
+                    return Ok(json!({"ok":true,"ids":request.body["events"].as_array().unwrap().iter().map(|e|e["id"].clone()).collect::<Vec<_>>()}));
+                }
+                apply(&root,&mut db,&request.body,Some("device:client"))?;
+                Ok(json!({"ok":true}))
+            } else if uri.path()=="/v3/deletions" {
+                reconciliation::deletion_page(&db,after)
+            } else {
+                storage::page(&db,after)
+            }
+        })();
+        match result { Ok(value)=>Reply::ok(value), Err(error)=>Reply{status:errors::status(error.as_ref()),body:json!({"error":error.to_string()})} }
+    })
+}
+
+#[test]
+fn a_batch_without_matching_acknowledgements_never_advances_the_sender() {
+    let root = crate::tests::root();
+    dispatch(json!({"op":"add","root":root,"item":note(9191)})).unwrap();
+    let peer = Peer::start(|request| {
+        if request.method == "POST" { Reply::ok(json!({"ok":true,"ids":[]})) }
+        else { Reply::ok(json!({"items":[],"cursor":0,"more":false,"protocol":3,"capabilities":["changeBatches"]})) }
+    });
+    let error = sync::synchronize(&root,&peer.endpoint,None,None).unwrap_err();
+    assert_eq!(errors::category(error.as_ref()),"protocol");
+    let shared = database(&root).unwrap();
+    let db = shared.lock().unwrap();
+    assert_eq!(db.query_row("SELECT pushed FROM cursors",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    assert_eq!(db.query_row("SELECT COUNT(*) FROM copies",[],|r|r.get::<_,i64>(0)).unwrap(),0);
+    drop(db); drop(shared);
+    crate::tests::cleanup(&root);
+}
+
+#[test]
+fn deletion_inventory_repairs_invalid_cursors_and_removes_favorites() {
+    let source=crate::tests::root(); let receiver=crate::tests::root();
+    let item=note(2200);
+    dispatch(json!({"op":"add","root":source,"item":item})).unwrap();
+    dispatch(json!({"op":"set_favorites","root":source,"ids":[item["id"]],"value":true})).unwrap();
+    let peer=database_peer(&source);
+    sync::synchronize(&receiver,&peer.endpoint,None,None).unwrap();
+    { let shared=database(&receiver).unwrap(); let db=shared.lock().unwrap();
+      db.execute("UPDATE cursors SET pulled=99999,pushed=99999,pulled_id='stale-checkpoint'",[]).unwrap(); }
+    dispatch(json!({"op":"delete","root":source,"id":item["id"]})).unwrap();
+    let result=sync::synchronize(&receiver,&peer.endpoint,None,None).unwrap();
+    assert!(result["entries"].as_array().unwrap().is_empty());
+    assert_eq!(result["favorites"][item["id"].as_str().unwrap()]["value"],false);
+    assert!(initialize(&source).unwrap()["entries"].as_array().unwrap().is_empty());
+    crate::tests::cleanup(&receiver); crate::tests::cleanup(&source);
+}
+
+#[test]
+fn deleted_messages_cannot_return_when_a_peer_restores_a_pre_deletion_backup() {
+    let source=crate::tests::root(); let receiver=crate::tests::root();
+    let item=note(2201);
+    dispatch(json!({"op":"add","root":source,"item":item})).unwrap();
+    let backup=source.join("before-delete.sqlite3");
+    dispatch(json!({"op":"backup_database","root":source,"path":backup})).unwrap();
+    let peer=database_peer(&source);
+    sync::synchronize(&receiver,&peer.endpoint,None,None).unwrap();
+    dispatch(json!({"op":"delete","root":receiver,"id":item["id"]})).unwrap();
+    sync::synchronize(&receiver,&peer.endpoint,None,None).unwrap();
+    let epoch={let db=database(&source).unwrap(); reconciliation::epoch(&db.lock().unwrap()).unwrap()};
+    dispatch(json!({"op":"close","root":source})).unwrap();
+    fs::copy(&backup,layout::database(&source)).unwrap();
+    assert_eq!(initialize(&source).unwrap()["entries"].as_array().unwrap().len(),1);
+    { let db=database(&source).unwrap(); assert_eq!(reconciliation::epoch(&db.lock().unwrap()).unwrap(),epoch); }
+    // Keep the send receipts and remove the normal receive checkpoint: deletion
+    // reconciliation itself must repair the restored copy, independently.
+    { let db=database(&receiver).unwrap(); db.lock().unwrap().execute("UPDATE cursors SET pulled=0,pulled_id=''",[]).unwrap(); }
+    sync::synchronize(&receiver,&peer.endpoint,None,None).unwrap();
+    assert!(initialize(&source).unwrap()["entries"].as_array().unwrap().is_empty());
+    assert!(initialize(&receiver).unwrap()["entries"].as_array().unwrap().is_empty());
+    crate::tests::cleanup(&receiver); crate::tests::cleanup(&source);
+}
+
+#[test]
+fn metadata_notifications_preempt_only_the_requested_file_run() {
+    let root=crate::tests::root();
+    initialize(&root).unwrap();
+    let first=sync_control::begin(&root,"device:peer").unwrap();
+    let run=sync_control::Run::acquire(&root,"device:peer",&first).unwrap();
+    assert!(!sync_control::interrupt_files(&root,"device:peer",&first));
+    assert!(run.check().is_ok());
+    assert!(run.file_phase().is_err());
+    drop(run);
+    let second=sync_control::begin(&root,"device:peer").unwrap();
+    let run=sync_control::Run::acquire(&root,"device:peer",&second).unwrap();
+    let phase=run.file_phase().unwrap();
+    assert!(!sync_control::interrupt_files(&root,"device:peer",&first));
+    assert!(run.check().is_ok());
+    assert!(sync_control::interrupt_files(&root,"device:peer",&second));
+    assert!(run.check().is_err());
+    drop(phase); drop(run);
+    crate::tests::cleanup(&root);
+}
+
+#[test]
+fn successful_http_without_a_change_acknowledgement_never_marks_a_copy() {
+    let root = crate::tests::root();
+    dispatch(json!({"op":"add","root":root,"item":note(901)})).unwrap();
+    let peer = Peer::start(|request| {
+        Reply::ok(if request.method == "GET" {
+            empty_page(true)
+        } else {
+            json!({"error":"not committed"})
+        })
+    });
+    assert!(sync::synchronize(&root, &peer.endpoint, None, None).is_err());
+    let shared = database(&root).unwrap();
+    let db = shared.lock().unwrap();
+    assert_eq!(
+        db.query_row("SELECT COUNT(*) FROM copies", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        db.query_row("SELECT pushed FROM cursors", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    crate::tests::cleanup(&root);
+}
+
+#[test]
+fn remote_attachment_storage_failure_never_blames_local_storage() {
+    let root = crate::tests::root();
+    initialize(&root).unwrap();
+    let mut item = note(903);
+    item["kind"] = json!("file");
+    item["name"] = json!("pending.bin");
+    item["sha256"] = json!("a".repeat(64));
+    item["size"] = json!(12);
+    let peer = Peer::start(|request| {
+        if request.method == "HEAD" {
+            Reply {
+                status: 507,
+                body: json!({"error":"disk full"}),
+            }
+        } else {
+            Reply::ok(empty_page(true))
+        }
+    });
+    let shared = database(&root).unwrap();
+    transfers::enqueue(
+        &shared.lock().unwrap(),
+        "device:test-peer",
+        "upload",
+        &json!({"sequence":1,"event":item_event(&item)}),
+    )
+    .unwrap();
+    let state = sync::synchronize(&root, &peer.endpoint, None, None).unwrap();
+    assert_eq!(state["transferErrorCategory"], "remote_storage");
+    crate::tests::cleanup(&root);
+}
+
+#[test]
+fn malformed_page_does_not_commit_deletions_or_advance_the_cursor() {
+    let root = crate::tests::root();
+    let original = note(902);
+    dispatch(json!({"op":"add","root":root,"item":original})).unwrap();
+    let target = original["id"].clone();
+    let peer = Peer::start(move |request| {
+        if request.method == "POST" {
+            return Reply::ok(json!({"ok":true}));
+        }
+        let event = json!({"id":"malformed-delete-event","type":"delete","target":target});
+        Reply::ok(
+            json!({"protocol":3,"capabilities":[],"items":[{"sequence":4,"event":event}],"cursor":3,"more":false}),
+        )
+    });
+    assert!(sync::synchronize(&root, &peer.endpoint, None, None).is_err());
+    let state = dispatch(json!({"op":"snapshot","root":root})).unwrap();
+    assert_eq!(state["entries"].as_array().unwrap().len(), 1);
+    let shared = database(&root).unwrap();
+    let db = shared.lock().unwrap();
+    assert_eq!(
+        db.query_row("SELECT pulled FROM cursors", [], |r| r.get::<_, i64>(0))
+            .unwrap(),
+        0
+    );
+    drop(db);
+    crate::tests::cleanup(&root);
+}
+
 #[test]
 fn favorite_removal_metadata_is_sent_even_when_its_shared_attachment_is_missing() {
     let root = crate::tests::root();
@@ -192,8 +388,8 @@ fn favorite_removal_metadata_is_sent_even_when_its_shared_attachment_is_missing(
             .any(|e| e["type"] == "favorite" && e["favorite"]["value"] == false)
     );
     assert_eq!(state["moreChanges"], false);
-    // Missing bytes remain a retryable transfer concern, not a metadata barrier.
-    assert!(!state["transferError"].is_null());
+    // Deleted attachments no longer leave a permanent missing-source job.
+    assert!(state["transferError"].is_null());
     crate::tests::cleanup(&root);
 }
 
@@ -313,7 +509,7 @@ fn cached_connection_never_reuses_old_credentials_or_certificate_identity() {
     );
     changed["fingerprint"] = json!("a".repeat(64));
     let error = sync::synchronize(&root, &changed, None, None).unwrap_err();
-    assert_eq!(errors::category(error.as_ref()), "authentication");
+    assert_eq!(errors::category(error.as_ref()), "identity");
     assert_eq!(seen.lock().unwrap().len(), 2);
     crate::tests::cleanup(&root);
 }

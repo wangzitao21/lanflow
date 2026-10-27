@@ -9,6 +9,7 @@ import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/inbox_labels.dart';
+import 'package:lanflow/ui/shared/app_dialogs.dart';
 
 class TransferDialog extends StatefulWidget {
   const TransferDialog({super.key, required this.inbox, this.embedded = false});
@@ -28,6 +29,7 @@ class _TransferDialogState extends State<TransferDialog> {
   int _historyOffset = 0;
   bool _historyMore = false;
   int _historyGeneration = 0;
+  int _activeLimit = 50;
 
   Future<void> _loadHistory({bool append = false}) async {
     if (append && _loading) return;
@@ -113,6 +115,7 @@ class _TransferDialogState extends State<TransferDialog> {
     setState(() => error = null);
     try {
       await widget.inbox.controlTransfer(task, action);
+      if (action == 'delete' && _scope == 'completed') await _loadHistory();
     } on Object catch (e) {
       if (mounted) {
         setState(() => error = userError(e, fallback: '操作失败，请重试'));
@@ -123,6 +126,18 @@ class _TransferDialogState extends State<TransferDialog> {
     }
   }
 
+  Future<void> _deleteTask(TransferTask task) async {
+    final approved = await showDialog<bool>(
+      context: context,
+      builder: (_) => const AppConfirmDialog(
+        title: '删除传输任务？',
+        message: '停止此任务并从列表移除。已保存的消息和文件保留，可在连接设置中重新同步。',
+        confirmLabel: '删除任务',
+      ),
+    );
+    if (approved == true && mounted) await _action(task, 'delete');
+  }
+
   @override
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.inbox.activity,
@@ -131,7 +146,10 @@ class _TransferDialogState extends State<TransferDialog> {
           ? _history
           : widget.inbox.transferTasks
                 .where((task) => _scope != 'failed' || task.state == 'failed')
+                .take(_activeLimit + 1)
                 .toList();
+      final moreActive = _scope != 'completed' && tasks.length > _activeLimit;
+      if (moreActive) tasks.removeLast();
       final content = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -151,6 +169,7 @@ class _TransferDialogState extends State<TransferDialog> {
                   onSelected: (_) {
                     setState(() {
                       _scope = scope.$1;
+                      _activeLimit = 50;
                       _historyGeneration++;
                       _loading = false;
                     });
@@ -190,14 +209,22 @@ class _TransferDialogState extends State<TransferDialog> {
                 : ListView.separated(
                     itemCount:
                         tasks.length +
-                        (_scope == 'completed' && _historyMore ? 1 : 0),
+                        ((_scope == 'completed' && _historyMore) || moreActive
+                            ? 1
+                            : 0),
                     separatorBuilder: (_, index) => const Divider(height: 24),
                     itemBuilder: (context, index) {
                       if (index == tasks.length) {
                         return TextButton(
                           onPressed: _loading
                               ? null
-                              : () => _loadHistory(append: true),
+                              : () {
+                                  if (_scope == 'completed') {
+                                    _loadHistory(append: true);
+                                  } else {
+                                    setState(() => _activeLimit += 50);
+                                  }
+                                },
                           child: Text(tr(context, _loading ? '加载中…' : '加载更多')),
                         );
                       }
@@ -304,6 +331,16 @@ class _TransferDialogState extends State<TransferDialog> {
                                   ),
                               ],
                             ),
+                          Align(
+                            alignment: Alignment.centerRight,
+                            child: TextButton(
+                              key: ValueKey('delete-transfer-${task.key}'),
+                              onPressed: disabled
+                                  ? null
+                                  : () => _deleteTask(task),
+                              child: Text(tr(context, '删除任务')),
+                            ),
+                          ),
                         ],
                       );
                     },

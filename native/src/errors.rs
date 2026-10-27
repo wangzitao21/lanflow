@@ -2,6 +2,7 @@
 pub(crate) struct ApiError {
     pub status: u16,
     pub message: String,
+    pub category: Option<&'static str>,
 }
 
 impl std::fmt::Display for ApiError {
@@ -18,6 +19,19 @@ pub(crate) fn api(
     Box::new(ApiError {
         status,
         message: message.into(),
+        category: None,
+    })
+}
+
+pub(crate) fn api_category(
+    status: u16,
+    category: &'static str,
+    message: impl Into<String>,
+) -> Box<dyn std::error::Error + Send + Sync> {
+    Box::new(ApiError {
+        status,
+        message: message.into(),
+        category: Some(category),
     })
 }
 
@@ -33,10 +47,16 @@ pub(crate) fn status(error: &(dyn std::error::Error + 'static)) -> u16 {
 
 pub(crate) fn category(error: &(dyn std::error::Error + 'static)) -> &'static str {
     if let Some(error) = error.downcast_ref::<ApiError>() {
+        if let Some(category) = error.category {
+            return category;
+        }
         return match error.status {
             401 | 403 => "authentication",
+            404 => "protocol",
+            409 => "conflict",
             499 => "cancelled",
             408 | 504 => "timeout",
+            425 => "source_pending",
             429 | 502 | 503 => "busy",
             507 => "storage",
             _ => "invalid",
@@ -49,7 +69,7 @@ pub(crate) fn category(error: &(dyn std::error::Error + 'static)) -> &'static st
                 .to_string()
                 .contains("Device certificate identity mismatch")
             {
-                return "authentication";
+                return "identity";
             }
             cause = value.source();
         }
@@ -62,9 +82,11 @@ pub(crate) fn category(error: &(dyn std::error::Error + 'static)) -> &'static st
         if let Some(status) = network.status() {
             return match status.as_u16() {
                 401 | 403 => "authentication",
+                404 => "protocol",
+                409 => "conflict",
                 408 | 504 => "timeout",
                 429 | 502 | 503 => "busy",
-                507 => "storage",
+                507 => "remote_storage",
                 _ => "invalid",
             };
         }
@@ -91,6 +113,12 @@ pub(crate) fn category(error: &(dyn std::error::Error + 'static)) -> &'static st
     }
     if error.is::<rusqlite::Error>() {
         return "storage";
+    }
+    if matches!(
+        error.to_string().as_str(),
+        "File checksum mismatch" | "Remote file checksum mismatch" | "Local file is incomplete"
+    ) {
+        return "integrity";
     }
     "unknown"
 }

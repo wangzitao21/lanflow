@@ -79,7 +79,7 @@ void main() {
         final reopened = InboxStore(Directory('${root.path}/a'));
         await reopened.load();
         expect(reopened.draftQuotes[defaultConversationId]!.text, '引用原文');
-        expect(reopened.preference(defaultConversationId).avatar, 'idea');
+        expect(reopened.conversations[defaultConversationId]!.avatar, 'idea');
         await reopened.close();
       } finally {
         await a.close();

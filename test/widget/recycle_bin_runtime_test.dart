@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:lanflow/core/inbox/inbox_store.dart';
 import 'package:lanflow/core/storage/storage_location.dart';
 import 'package:lanflow/runtime.dart';
 import 'package:lanflow/ui/chat/desktop_navigation.dart';
@@ -54,7 +55,6 @@ void main() {
           );
           await initial.inbox.setFavorites([favoriteMessage.item.id], true);
           favoriteId = initial.inbox.favoriteEntries.single.id;
-          await initial.inbox.deleteItem(favoriteMessage.item);
           final discarded = (await initial.inbox.addText(
             'Discard both independent records',
           ))!;
@@ -91,7 +91,10 @@ void main() {
               tester.widget<MobileHome>(find.byType(MobileHome)).section,
               MobileSection.trash,
             );
-            expect(find.byKey(const ValueKey('mobile-nav-conversations')), findsOneWidget);
+            expect(
+              find.byKey(const ValueKey('mobile-nav-conversations')),
+              findsOneWidget,
+            );
           } else {
             expect(
               tester
@@ -104,9 +107,15 @@ void main() {
 
         Future<void> verifyProtected() async {
           final current = home().inbox;
-          expect(current.items.length, 2);
+          final persisted = await tester.runAsync(
+            () async => current.store.loadEntries(
+              await current.store.conversationIds(current.conversationId),
+            ),
+          );
+          expect(current.store.messageCount, 3);
+          expect(persisted, hasLength(3));
           expect(
-            current.items.any(
+            persisted!.any(
               (entry) => entry.item.text == 'Live conversation text',
             ),
             isTrue,
@@ -191,7 +200,7 @@ void main() {
             await tester.runAsync(() async {
               expect(
                 (await home().inbox.store.recentlyDeleted()).length,
-                failClose ? 3 : 0,
+                failClose ? 1 : 0,
               );
               if (failClose) {
                 await blocker!.delete();
@@ -208,10 +217,8 @@ void main() {
               findsNothing,
             );
             expect(tester.takeException(), isNull);
-            if (failClose) {
-              await tester.tap(find.text('知道了'));
-              await tester.pump();
-            }
+            await tester.pump(const Duration(seconds: 1));
+            expect(find.byKey(const ValueKey('runtime-notice')), findsNothing);
           }
         } finally {
           final current = home();

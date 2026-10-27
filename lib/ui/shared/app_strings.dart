@@ -80,6 +80,112 @@ class _TranslationTemplate {
 }
 
 const _english = <String, String>{
+  '同步未完成': 'Sync incomplete',
+  '会话顺序未保存，请重试': 'Conversation order could not be saved. Try again.',
+  '消息已删除': 'Message deleted',
+  '消息详情': 'Message details',
+  'Enter 发送，Ctrl+Enter 或 Shift+Enter 换行':
+      'Enter to send, Ctrl+Enter or Shift+Enter for a new line',
+  '收藏显示原消息的最新内容。删除消息会同步删除所有设备上的会话与收藏记录。':
+      'Favorites show the latest message. Deleting a message removes it from conversations and favorites on all devices.',
+  '这会删除原消息及其收藏，并在联网后同步删除其他设备上的同一消息。':
+      'This deletes the message and its favorite entry. The deletion reaches other devices when they reconnect.',
+  '正在核对原消息状态': 'Checking the original message',
+  '{count} 条消息存在版本冲突': '{count} messages have conflicting versions',
+  '处理冲突': 'Resolve conflicts',
+  '同步问题': 'Sync issues',
+  '暂无消息版本冲突': 'No message version conflicts',
+  '所有冲突版本均已保留，处理结果会同步到其他设备。':
+      'All conflicting versions are retained. Your resolution will sync to other devices.',
+  '消息版本冲突': 'Conflicting message versions',
+  '多个设备分别修改了同一消息。选择要保留的版本，或编辑后采用。':
+      'Several devices edited this message independently. Choose a version or edit one before keeping it.',
+  '旧版设备': 'Older device',
+  '采用此版本': 'Keep this version',
+  '编辑后采用': 'Edit and keep',
+  '删除所有版本': 'Delete all versions',
+  '删除所有冲突版本？': 'Delete all conflicting versions?',
+  '这条消息的所有版本将从会话中删除，并在联网后同步删除其他设备上的这条消息。':
+      'All versions of this message will be removed from conversations. The deletion will sync to other devices when connected.',
+  '保存后，此内容将替代当前列出的冲突版本，并同步到其他设备。':
+      'Saving replaces the listed conflicting versions with this content and syncs the result to other devices.',
+  '采用修改后的版本': 'Keep the edited version',
+  '消息内容': 'Message content',
+  '内容冲突，待选择': 'Conflicting versions · Choose a version',
+  '连接或传输待处理': 'Connection or transfer needs attention',
+  '冲突版本已更新，请重新查看后选择':
+      'The conflicting versions changed. Review them again before choosing.',
+  '请先选择或编辑这条消息的冲突版本': 'Choose or edit a conflicting version first.',
+  '处理未完成，请重试': 'Could not complete the action. Try again.',
+  '消息内容不能为空': 'Message content cannot be empty.',
+  '重新设置': 'Configure',
+  '重新设置连接': 'Connection settings',
+  '移除连接': 'Remove connection',
+  '移除连接“{name}”？': 'Remove connection “{name}”?',
+  '移除后停止与此设备同步。本机消息和文件会保留，以后可以重新添加。':
+      'Sync with this device will stop. Local messages and files are retained. You can add it again later.',
+  '设置未保存，请重试': 'Settings were not saved. Try again.',
+  '设备已移除': 'This device has been removed.',
+  '此 NAS 已在列表中': 'This NAS is already listed.',
+  '设备名称最多 60 个字': 'Device names can contain up to 60 characters.',
+  '保存设置': 'Save settings',
+  '新的 NAS 连接码（留空保留原值）':
+      'New NAS connection code (leave blank to keep the current one)',
+  '保存后重新绑定': 'Pair again after saving',
+  '另一台设备需要确认；未确认时保留原绑定。':
+      'Confirmation is required on the other device. The current pairing is kept until confirmed.',
+  '重新同步全部内容？': 'Check and sync all content again?',
+  '将重新核对消息和附件，并重建已删除的传输任务。本机内容保留，手动暂停或取消的任务保持原状态。':
+      'Messages and attachments will be checked again, and removed transfer tasks will be rebuilt. Local content is retained. Paused or cancelled tasks stay unchanged.',
+  '重新同步': 'Sync again',
+  '已重建同步记录，连接可用时继续同步':
+      'Sync records were rebuilt. Sync continues when the connection is available.',
+  '删除传输任务？': 'Remove this transfer task?',
+  '停止此任务并从列表移除。已保存的消息和文件保留，可在连接设置中重新同步。':
+      'Stop this task and remove it from the list. Saved messages and files are retained. Connection settings let you sync again.',
+  '删除任务': 'Remove task',
+  '连接不到设备，请确认对方已打开 LanFlow 且网络可达':
+      'Cannot reach the device. Keep LanFlow open there and check the network.',
+  '连接不到 NAS，请检查 NAS 地址和网络':
+      'Cannot reach the NAS. Check its address and network.',
+  '连接超时，稍后自动重试': 'Connection timed out. Retrying automatically.',
+  '对方暂时忙，稍后自动重试': 'The other device is busy. Retrying automatically.',
+  '对方已暂停同步，恢复后会继续':
+      'Sync is paused on the other device. Resume it there to continue.',
+  '对方正在准备同步，稍后自动重试':
+      'The other device is starting sync. Retrying automatically.',
+  '设备身份校验失败，请确认设备地址或重新绑定':
+      'Device identity could not be verified. Check its address or pair it again.',
+  '本机存储读写失败，请检查剩余空间和权限':
+      'Cannot access local storage. Check free space and permissions.',
+  '对方存储读写失败，请检查对方的剩余空间和权限':
+      'Cannot access storage on the other device. Check its free space and permissions.',
+  '对方的同步响应无效或版本不兼容，请更新两端 LanFlow':
+      'Invalid or incompatible sync response. Update LanFlow on both devices.',
+  '同步记录不一致，原内容已保留，请检查两端版本':
+      'Sync records conflict. Original content is retained. Check both app versions.',
+  '当前网络无法连接此设备，请检查网络后重试':
+      'This device is unreachable on the current network. Check the connection and retry.',
+  '同步状态读取失败，请检查本机存储后重试':
+      'Cannot read sync status. Check local storage and retry.',
+  '等待连接': 'Waiting to connect',
+  '附件校验未通过，正在重新传输': 'Attachment verification failed. Retrying automatically.',
+  '本机附件尚未完整，等待自动补齐': 'Waiting to finish downloading the local attachment.',
+  '附件尚未完整，等待自动补齐': 'Waiting to finish transferring the attachment.',
+  '同步记录不一致，请重试；原内容已保留':
+      'Sync records differ. Retry sync; the original content has been preserved.',
+  '内容超过长度限制，请缩短后保存': 'The content is too long. Shorten it and save again.',
+  '修改': 'Edit',
+  '头像颜色': 'Avatar color',
+  '文件名': 'File name',
+  '添加说明': 'Add a caption',
+  '文件名不能为空': 'Enter a file name',
+  '消息不能为空': 'Enter a message',
+  '修改未保存，请重试': 'Changes were not saved. Try again.',
+  '消息已删除，无法修改': 'This message was deleted and cannot be edited.',
+  '等待附件来源设备上线': 'Waiting for a device with this attachment to come online',
+  '绑定后自动连接彼此已绑定的设备，全部内容会自动同步。':
+      'Pair once to connect all your paired devices and sync all content automatically.',
   '草稿': 'Draft',
   '引用': 'Quote',
   '取消引用': 'Remove quote',

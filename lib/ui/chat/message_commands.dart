@@ -46,7 +46,7 @@ extension _MessageCommands on _HomePageState {
     _selection.setBusy(true);
     try {
       await inbox.setFavorites(ids, value);
-      _toast(value ? '已加入收藏' : '已取消收藏');
+      if (value) _toast('已加入收藏');
     } on Object catch (error) {
       _toast(userError(error, fallback: '收藏操作失败，请重试'));
     } finally {
@@ -86,25 +86,6 @@ extension _MessageCommands on _HomePageState {
     try {
       await inbox.deleteItems(entries.map((e) => e.item.id));
       deleted = true;
-      if (mounted) {
-        showAppMessage(
-          context,
-          tr(context, '已删除 {count} 条消息', {'count': entries.length}),
-          duration: const Duration(seconds: 1),
-          action: SnackBarAction(
-            label: tr(context, inbox.linkFavoriteDeletion ? '恢复消息' : '撤销'),
-            onPressed: () async {
-              try {
-                for (final entry in entries) {
-                  await inbox.restoreItem(entry.item);
-                }
-              } on Object catch (error) {
-                _toast(userError(error, fallback: '恢复失败，请重试'));
-              }
-            },
-          ),
-        );
-      }
     } on Object catch (error) {
       _toast(userError(error, fallback: '删除失败，请重试'));
     } finally {

@@ -18,6 +18,7 @@ pub(super) fn database(root: &Path) -> Result<Database> {
 }
 
 fn schema(db: &mut Connection, hub: bool) -> Result<()> {
+    short_search::register(db)?;
     db.busy_timeout(Duration::from_secs(if hub { 30 } else { 15 }))?;
     db.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")?;
     let tx = db.transaction()?;
@@ -33,6 +34,7 @@ fn schema(db: &mut Connection, hub: bool) -> Result<()> {
         CREATE TABLE IF NOT EXISTS deleted(id TEXT PRIMARY KEY);
         CREATE TABLE IF NOT EXISTS profiles(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS conversations(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS message_edits(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS favorites(id TEXT PRIMARY KEY, revision INTEGER NOT NULL, event_id TEXT NOT NULL, body TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS copies(item_id TEXT NOT NULL, endpoint TEXT NOT NULL, PRIMARY KEY(item_id,endpoint));
         CREATE TABLE IF NOT EXISTS seen(event_id TEXT NOT NULL, endpoint TEXT NOT NULL, PRIMARY KEY(event_id,endpoint));
@@ -47,6 +49,7 @@ fn schema(db: &mut Connection, hub: bool) -> Result<()> {
         INSERT INTO content_revision SELECT value FROM revision WHERE NOT EXISTS(SELECT 1 FROM content_revision);
         CREATE TABLE IF NOT EXISTS state_changes(kind TEXT NOT NULL,id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(kind,id));
         CREATE INDEX IF NOT EXISTS state_changes_revision ON state_changes(revision);
+        CREATE INDEX IF NOT EXISTS state_changes_kind_revision ON state_changes(kind,revision);
         CREATE INDEX IF NOT EXISTS items_sequence ON items(sequence);
         CREATE INDEX IF NOT EXISTS items_sequence_id ON items(sequence,id);
         CREATE INDEX IF NOT EXISTS items_conversation_sequence ON items(COALESCE(json_extract(body,'$.conversationId'),'lanflow-self-chat'),sequence,json_extract(body,'$.originId')) WHERE json_valid(body);
@@ -170,8 +173,23 @@ fn schema(db: &mut Connection, hub: bool) -> Result<()> {
     if !snapshot_cursor {
         tx.execute("ALTER TABLE cursors ADD COLUMN favorite_snapshots_supported INTEGER NOT NULL DEFAULT 0",[])?;
     }
+    let edit_cursor: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('cursors') WHERE name='edits_supported')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !edit_cursor {
+        tx.execute(
+            "ALTER TABLE cursors ADD COLUMN edits_supported INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
     search::schema(&tx)?;
     favorites::schema(&tx)?;
+    message_edits::schema(&tx)?;
+    reconciliation::schema(&tx)?;
+    history::schema(&tx)?;
+    transfers::schema(&tx)?;
     tx.commit()?;
     Ok(())
 }
@@ -363,6 +381,7 @@ fn delta(db: &Connection, after: i64, revision: i64) -> Result<Value> {
         .collect::<std::result::Result<Vec<_>, _>>()?;
     value["deleted"] = json!(deleted);
     value["history"] = history::summaries(db, Some(after))?;
+    value["conflicts"] = message_edits::conflicts(db)?;
     Ok(value)
 }
 
@@ -427,6 +446,7 @@ fn snapshot_content(db: &Connection, history: bool) -> Result<Value> {
         );
     }
     value["favorites"] = json!(favorites);
+    value["conflicts"] = message_edits::conflicts(db)?;
     value["deleted"] = json!(tombstones);
     value["revision"] =
         json!(db.query_row("SELECT value FROM revision", [], |r| r.get::<_, i64>(0))?);
@@ -496,7 +516,7 @@ pub(super) fn change_cursor(db: &Connection) -> Result<i64> {
 }
 
 pub(super) fn page(db: &Connection, after: i64) -> Result<Value> {
-    changes_page(db, after, true, true)
+    changes_page(db, after, true, true, true)
 }
 
 pub(super) fn requested_page(db: &Connection, after: i64, capabilities: &Value) -> Result<Value> {
@@ -513,18 +533,25 @@ pub(super) fn requested_page(db: &Connection, after: i64, capabilities: &Value) 
         after,
         supports("favorites"),
         supports("favoriteSnapshots"),
+        supports("messageEdits"),
     )
 }
 
-fn changes_page(db: &Connection, after: i64, favorites: bool, snapshots: bool) -> Result<Value> {
+fn changes_page(
+    db: &Connection,
+    after: i64,
+    favorites: bool,
+    snapshots: bool,
+    edits: bool,
+) -> Result<Value> {
     if after < 0 {
         return Err("Invalid cursor".into());
     }
     // Older clients reject unknown event kinds and require cursor to match the
     // last visible record, so optional events must be filtered before paging.
-    let mut stmt = db.prepare("SELECT sequence,body FROM events WHERE sequence>?1 AND (?2 OR json_extract(body,'$.type')!='favorite') AND (?3 OR json_extract(body,'$.type')!='favorite_snapshot') ORDER BY sequence LIMIT 51")?;
+    let mut stmt = db.prepare("SELECT sequence,body FROM events WHERE sequence>?1 AND (?2 OR json_extract(body,'$.type')!='favorite') AND (?3 OR json_extract(body,'$.type')!='favorite_snapshot') AND (?4 OR json_extract(body,'$.type')!='edit') ORDER BY sequence LIMIT 51")?;
     let rows = stmt
-        .query_map(params![after, favorites, snapshots], |r| {
+        .query_map(params![after, favorites, snapshots, edits], |r| {
             Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
         })?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -539,9 +566,9 @@ fn changes_page(db: &Connection, after: i64, favorites: bool, snapshots: bool) -
         cursor = *sequence;
         items.push(json!({"sequence":sequence,"event":serde_json::from_str::<Value>(body)?}));
     }
-    Ok(
-        json!({"items":items,"cursor":cursor,"more":rows.last().is_some_and(|r|r.0>cursor),"protocol":3,"capabilities":["favorites","favoriteSnapshots"]}),
-    )
+    let mut page = json!({"items":items,"cursor":cursor,"more":rows.last().is_some_and(|r|r.0>cursor),"protocol":3,"capabilities":["favorites","favoriteSnapshots","messageEdits","deletionInventory","changeBatches"]});
+    reconciliation::annotate_page(db,after,&mut page)?;
+    Ok(page)
 }
 
 pub(super) fn initialize(root: &Path) -> Result<Value> {

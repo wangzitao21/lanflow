@@ -76,6 +76,7 @@ pub(super) fn restore(root: &Path, db: &mut Connection, target: &str) -> Result<
         return Ok(());
     };
     let mut item: Value = serde_json::from_str(&body)?;
+    let was_favorite = item["_wasFavorite"] == true;
     // Keep the tombstone immutable for old/offline peers. A deterministic new
     // identity also makes a retry after a crash between these writes idempotent.
     let restored = digest(format!("restore:{target}").as_bytes());
@@ -83,8 +84,16 @@ pub(super) fn restore(root: &Path, db: &mut Connection, target: &str) -> Result<
         return Err("此内容已恢复过，请在回收站中恢复较新的记录".into());
     }
     item["id"] = json!(restored);
-    apply(root, db, &item_event(&item), None)?;
-    db.execute("DELETE FROM trash WHERE id=?", [target])?;
+    let tx=db.transaction()?;
+    let existing: Option<String> = tx.query_row("SELECT body FROM items WHERE id=?",[string(&item,"id")?],|r| r.get(0)).optional()?;
+    let item=if let Some(existing)=existing { events::normalize_item(&serde_json::from_str::<Value>(&existing)?)? } else {
+        let item=events::normalize_item(&item)?;
+        events::apply_transaction(root,&tx,&item_event(&item),None)?;
+        item
+    };
+    if was_favorite { favorites::restore_mark(&tx,&item,target)?; }
+    tx.execute("DELETE FROM trash WHERE id=?", [target])?;
+    tx.commit()?;
     Ok(())
 }
 

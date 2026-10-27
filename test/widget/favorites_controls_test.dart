@@ -400,10 +400,13 @@ void main() {
         await tester.pumpAndSettle();
         await tester.tap(find.byKey(ValueKey('favorite-delete-${target.id}')));
         await tester.pumpAndSettle();
+        await tester.tap(find.widgetWithText(FilledButton,'Delete favorite'));
+        await settle(tester);
         expect(inbox.saved.any((entry) => entry.id == target.id), isFalse);
         expect(find.byType(FavoriteDetail), findsNothing);
         expect(find.textContaining('selected'), findsNothing);
-        await tester.tap(find.text('Undo'));
+        expect(find.byType(SnackBar), findsNothing);
+        await inbox.restoreFavorites([target.id]);
         await tester.pumpAndSettle();
         expect(inbox.saved.any((entry) => entry.id == target.id), isTrue);
       }
@@ -411,7 +414,7 @@ void main() {
       final target = inbox.saved.first;
       await tester.tap(find.byKey(ValueKey('favorite-delete-${target.id}')));
       await tester.pumpAndSettle();
-      expect(find.textContaining('Linked deletion is enabled'), findsOneWidget);
+      expect(find.textContaining('This deletes the message'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(inbox.saved.any((entry) => entry.id == target.id), isTrue);

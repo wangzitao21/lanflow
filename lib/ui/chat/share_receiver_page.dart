@@ -177,9 +177,8 @@ class _ShareReceiverPageState extends State<ShareReceiverPage> {
                               key: ValueKey('share-to-${item.id}'),
                               leading: ConversationAvatar(
                                 id: item.id,
-                                avatar: widget.inbox.store
-                                    .preference(item.id)
-                                    .avatar,
+                                color: item.avatarColor,
+                                avatar: item.avatar,
                               ),
                               title: Text(item.name),
                               trailing: const Icon(Icons.chevron_right),
@@ -206,9 +205,12 @@ class _ShareReceiverPageState extends State<ShareReceiverPage> {
                                 contentPadding: EdgeInsets.zero,
                                 leading: ConversationAvatar(
                                   id: _target!,
-                                  avatar: widget.inbox.store
-                                      .preference(_target!)
-                                      .avatar,
+                                  color: widget.inbox.conversationAvatarColor(
+                                    _target!,
+                                  ),
+                                  avatar: widget.inbox.conversationAvatar(
+                                    _target!,
+                                  ),
                                 ),
                                 title: Text(
                                   target?.name ?? tr(context, '发给自己'),

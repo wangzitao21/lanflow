@@ -10,6 +10,7 @@ import 'package:lanflow/core/inbox/inbox_controller.dart';
 import 'package:lanflow/ui/settings/storage_dialog.dart';
 import 'package:lanflow/ui/shared/chat_theme.dart';
 import 'package:lanflow/ui/shared/device_avatar.dart';
+import 'package:lanflow/ui/shared/device_avatar_choices.dart';
 import 'package:lanflow/ui/shared/motion.dart';
 import 'package:lanflow/ui/shared/app_panel.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
@@ -47,13 +48,18 @@ class _SettingsPanelState extends State<SettingsPanel> {
   late String _avatar = widget.inbox.lan.ready
       ? widget.inbox.deviceAvatar(widget.inbox.lan.identity.id) ?? ''
       : '';
+  late String? _avatarPreset = widget.inbox.lan.identityReady
+      ? widget.inbox.deviceAvatarPreset(widget.inbox.lan.identity.id)
+      : null;
+  late int? _avatarColor = widget.inbox.lan.identityReady
+      ? widget.inbox.deviceAvatarColor(widget.inbox.lan.identity.id)
+      : null;
   late final _pages = [widget.initialPage];
   SettingsPage get _page => _pages.last;
   bool _saving = false;
   bool _picking = false;
   bool _changingAppearance = false;
   bool _changingLanguage = false;
-  bool _changingFavoriteDeletion = false;
   String? _error;
   InboxController get inbox => widget.inbox;
   bool get _canBack => _pages.length > 1;
@@ -121,6 +127,12 @@ class _SettingsPanelState extends State<SettingsPanel> {
     _avatar = inbox.lan.identityReady
         ? inbox.deviceAvatar(inbox.lan.identity.id) ?? ''
         : '';
+    _avatarPreset = inbox.lan.identityReady
+        ? inbox.deviceAvatarPreset(inbox.lan.identity.id)
+        : null;
+    _avatarColor = inbox.lan.identityReady
+        ? inbox.deviceAvatarColor(inbox.lan.identity.id)
+        : null;
     _back();
   }
 
@@ -164,21 +176,6 @@ class _SettingsPanelState extends State<SettingsPanel> {
       if (mounted) showAppMessage(context, '诊断信息已复制');
     } on Object {
       if (mounted) setState(() => _error = '复制失败，请重试');
-    }
-  }
-
-  Future<void> _favoriteDeletion(bool value) async {
-    if (_changingFavoriteDeletion) return;
-    setState(() {
-      _changingFavoriteDeletion = true;
-      _error = null;
-    });
-    try {
-      await inbox.setLinkFavoriteDeletion(value);
-    } on Object {
-      if (mounted) setState(() => _error = '收藏设置未保存，请重试');
-    } finally {
-      if (mounted) setState(() => _changingFavoriteDeletion = false);
     }
   }
 
@@ -269,7 +266,13 @@ class _SettingsPanelState extends State<SettingsPanel> {
       _error = null;
     });
     try {
-      await inbox.updateProfile(_name.text.trim(), avatar: _avatar);
+      await inbox.updateProfile(
+        _name.text.trim(),
+        avatar: _avatar,
+        appearance: true,
+        preset: _avatarPreset,
+        color: _avatarColor,
+      );
       if (mounted) {
         setState(() => _saving = false);
         _back();
@@ -315,11 +318,11 @@ class _SettingsPanelState extends State<SettingsPanel> {
                   children: [
                     DeviceAvatar(
                       image: _avatar,
+                      preset: _avatarPreset,
+                      color: _avatarColor,
                       size: 64,
                       local: true,
-                      platform: AppLayout.desktop(context)
-                          ? 'windows'
-                          : 'android',
+                      platform: Theme.of(context).platform.name.toLowerCase(),
                     ),
                     const Positioned(
                       right: 0,
@@ -353,11 +356,17 @@ class _SettingsPanelState extends State<SettingsPanel> {
                       ),
                     ),
                   ],
-                  if (_avatar.isNotEmpty)
+                  if (_avatar.isNotEmpty ||
+                      _avatarPreset != null ||
+                      _avatarColor != null)
                     TextButton(
                       onPressed: _saving || _picking
                           ? null
-                          : () => setState(() => _avatar = ''),
+                          : () => setState(() {
+                              _avatar = '';
+                              _avatarPreset = null;
+                              _avatarColor = null;
+                            }),
                       child: Text(tr(context, '恢复默认头像')),
                     ),
                 ],
@@ -373,6 +382,22 @@ class _SettingsPanelState extends State<SettingsPanel> {
           onChanged: (_) => setState(() {}),
           decoration: InputDecoration(labelText: tr(context, '设备名称')),
         ),
+        const SizedBox(height: 24),
+        DeviceAvatarChoices(
+          preset: _avatarPreset,
+          color: _avatarColor,
+          photo: _avatar.isNotEmpty,
+          platform: Theme.of(context).platform.name.toLowerCase(),
+          onPreset: _saving || _picking
+              ? null
+              : (value) => setState(() {
+                  _avatarPreset = value;
+                  _avatar = '';
+                }),
+          onColor: _saving || _picking
+              ? null
+              : (value) => setState(() => _avatarColor = value),
+        ),
       ],
     );
   }
@@ -387,9 +412,15 @@ class _SettingsPanelState extends State<SettingsPanel> {
             image: inbox.lan.identityReady
                 ? inbox.deviceAvatar(inbox.lan.identity.id)
                 : null,
+            preset: inbox.lan.identityReady
+                ? inbox.deviceAvatarPreset(inbox.lan.identity.id)
+                : null,
+            color: inbox.lan.identityReady
+                ? inbox.deviceAvatarColor(inbox.lan.identity.id)
+                : null,
             size: 48,
             local: true,
-            platform: AppLayout.desktop(context) ? 'windows' : 'android',
+            platform: Theme.of(context).platform.name.toLowerCase(),
           ),
           title: Text(
             inbox.lan.name.isEmpty ? tr(context, '本机') : inbox.lan.name,
@@ -456,16 +487,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
         ),
         const Divider(height: 32),
         Text(tr(context, '收藏'), style: Theme.of(context).textTheme.titleMedium),
-        SwitchListTile.adaptive(
-          key: const ValueKey('link-favorite-deletion'),
-          contentPadding: EdgeInsets.zero,
-          title: Text(tr(context, '会话与收藏联动删除')),
-          subtitle: Text(tr(context, '默认互不影响。开启后，删除一处也会删除对应的另一处。')),
-          value: inbox.linkFavoriteDeletion,
-          onChanged: !inbox.ready || _changingFavoriteDeletion
-              ? null
-              : _favoriteDeletion,
-        ),
+        Text(tr(context, '收藏显示原消息的最新内容。删除消息会同步删除所有设备上的会话与收藏记录。')),
         const Divider(height: 32),
         Text(
           tr(context, '后台运行'),

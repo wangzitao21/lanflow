@@ -297,14 +297,13 @@ class _FavoritesPanelState extends State<FavoritesPanel> {
 
   Future<bool> _delete(List<FavoriteEntry> entries) async {
     if (_busy || entries.isEmpty) return false;
-    final linked = widget.inbox.linkFavoriteDeletion;
-    if (linked) {
+    {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (context) => AppConfirmDialog(
           title: tr(context, '删除 {count} 项收藏？', {'count': entries.length}),
           confirmLabel: tr(context, '删除收藏'),
-          message: tr(context, '已开启联动删除，同时删除仍存在的原消息；可分别在回收站恢复收藏和原消息。'),
+          message: tr(context, '这会删除原消息及其收藏，并在联网后同步删除其他设备上的同一消息。'),
         ),
       );
       if (confirmed != true || !mounted) return false;
@@ -321,15 +320,6 @@ class _FavoritesPanelState extends State<FavoritesPanel> {
           _selected.removeAll(ids);
           if (_selected.isEmpty) _selecting = false;
         });
-        showAppMessage(
-          context,
-          tr(context, '已删除 {count} 项收藏', {'count': ids.length}),
-          duration: const Duration(seconds: 1),
-          action: SnackBarAction(
-            label: tr(context, linked ? '恢复收藏' : '撤销'),
-            onPressed: () => unawaited(_restore(ids)),
-          ),
-        );
       }
       return true;
     } on Object catch (error) {
@@ -339,17 +329,6 @@ class _FavoritesPanelState extends State<FavoritesPanel> {
       return false;
     } finally {
       if (mounted) setState(() => _busy = false);
-    }
-  }
-
-  Future<void> _restore(List<String> ids) async {
-    try {
-      await widget.inbox.restoreFavorites(ids);
-      if (mounted) showAppMessage(context, '已恢复收藏');
-    } on Object catch (error) {
-      if (mounted) {
-        setState(() => _error = userError(error, fallback: '恢复失败，请重试'));
-      }
     }
   }
 

@@ -84,6 +84,67 @@ class _Nas {
 
 void main() {
   test(
+    'NAS retains concurrent edits and relays the user resolution to new devices',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'lanflow-nas-conflict-',
+      );
+      final nas = _Nas(Directory('${root.path}/nas'));
+      final devices = <TestDevice>[];
+      Future<TestDevice> create(String name) async {
+        final device = await TestDevice.create('${root.path}/$name', name);
+        devices.add(device);
+        await device.inbox.addHub(nas.address, nas.code, 'NAS');
+        return device;
+      }
+
+      try {
+        await nas.start();
+        final a = await create('Alpha');
+        final entry = (await a.inbox.addText('original'))!;
+        await a.inbox.syncNow();
+        final b = await create('Beta');
+        await b.inbox.syncNow();
+        await a.inbox.editMessage(entry.item, text: 'Alpha version');
+        await b.inbox.editMessage(
+          b.inbox.store.find(entry.item.id)!.item,
+          text: 'Beta version',
+        );
+        await a.inbox.syncNow();
+        await b.inbox.syncNow();
+        await a.inbox.syncNow();
+        expect(a.inbox.syncProblems.single.versions, hasLength(2));
+        expect(b.inbox.syncProblems.single.versions, hasLength(2));
+        final conflict = a.inbox.syncProblems.single;
+        await a.inbox.resolveConflict(
+          conflict,
+          versionId: conflict.versions
+              .firstWhere((v) => v.text == 'Beta version')
+              .id,
+        );
+        await a.inbox.syncNow();
+        await b.inbox.syncNow();
+        final c = await create('Gamma');
+        await c.inbox.syncNow();
+        for (final device in devices) {
+          expect(
+            device.inbox.store.find(entry.item.id)!.item.text,
+            'Beta version',
+          );
+          expect(device.inbox.syncProblems, isEmpty);
+        }
+      } finally {
+        for (final device in devices.reversed) {
+          await device.close();
+          device.inbox.dispose();
+          device.lan.dispose();
+        }
+        await nas.stop();
+        await root.delete(recursive: true);
+      }
+    },
+  );
+  test(
     'NAS content notifications wake an idle client without periodic sync',
     () async {
       final root = await Directory.systemTemp.createTemp('lanflow-nas-notify-');

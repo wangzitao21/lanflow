@@ -2,6 +2,7 @@ import 'dart:io';
 import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 
 import 'app_strings.dart';
 import 'chat_theme.dart';
@@ -15,11 +16,13 @@ class AttachmentThumbnail extends StatelessWidget {
     required this.maxHeight,
     this.onTap,
     this.semanticLabel,
+    this.minExtent = 0,
   }) : assert(maxWidth > 0 && maxWidth < double.infinity),
        assert(maxHeight > 0 && maxHeight < double.infinity);
 
   final File file;
   final double maxWidth, maxHeight;
+  final double minExtent;
   final VoidCallback? onTap;
   final String? semanticLabel;
 
@@ -66,27 +69,76 @@ class AttachmentThumbnail extends StatelessWidget {
         borderRadius: AppCorners.border,
         child: ClipRRect(
           borderRadius: AppCorners.border,
-          child: Image(
-            image: ResizeImage(
-              FileImage(file),
-              width: (maxWidth * density).ceil().clamp(1, 1024),
-              height: (maxHeight * density).ceil().clamp(1, 1536),
-              policy: ResizeImagePolicy.fit,
-              allowUpscaling: false,
+          child: _MinimumPreviewExtent(
+            minExtent: minExtent,
+            child: Image(
+              image: ResizeImage(
+                FileImage(file),
+                width: (maxWidth * density).ceil().clamp(1, 1024),
+                height: (maxHeight * density).ceil().clamp(1, 1536),
+                policy: ResizeImagePolicy.fit,
+                allowUpscaling: false,
+              ),
+              // No width/height or opaque loaded-image background: RenderImage
+              // fits its intrinsic dimensions to the loose bounds above.
+              fit: BoxFit.contain,
+              semanticLabel: semanticLabel,
+              filterQuality: FilterQuality.medium,
+              frameBuilder: (_, child, frame, synchronous) =>
+                  synchronous || frame != null
+                  ? child
+                  : placeholder(failed: false),
+              errorBuilder: (_, _, _) => placeholder(failed: true),
             ),
-            // No width/height or opaque loaded-image background: RenderImage
-            // fits its intrinsic dimensions to the loose bounds above.
-            fit: BoxFit.contain,
-            semanticLabel: semanticLabel,
-            filterQuality: FilterQuality.medium,
-            frameBuilder: (_, child, frame, synchronous) =>
-                synchronous || frame != null
-                ? child
-                : placeholder(failed: false),
-            errorBuilder: (_, _, _) => placeholder(failed: true),
           ),
         ),
       ),
     );
+  }
+}
+
+// Very small images still need an independent tap target beside the receipt.
+// Scale only small previews, preserving their aspect ratio and the upper bounds.
+class _MinimumPreviewExtent extends SingleChildRenderObjectWidget {
+  const _MinimumPreviewExtent({required this.minExtent, required super.child});
+  final double minExtent;
+  @override
+  RenderObject createRenderObject(BuildContext context) =>
+      _PreviewExtentBox(minExtent);
+  @override
+  void updateRenderObject(
+    BuildContext context,
+    _PreviewExtentBox renderObject,
+  ) {
+    if (renderObject.minExtent != minExtent) {
+      renderObject.minExtent = minExtent;
+      renderObject.markNeedsLayout();
+    }
+  }
+}
+
+class _PreviewExtentBox extends RenderProxyBox {
+  _PreviewExtentBox(this.minExtent);
+  double minExtent;
+  Size _target(Size size, BoxConstraints bounds) {
+    final longest = math.max(size.width, size.height);
+    return longest > 0 && longest < minExtent
+        ? bounds.constrainSizeAndAttemptToPreserveAspectRatio(
+            size * (minExtent / longest),
+          )
+        : bounds.constrain(size);
+  }
+
+  @override
+  Size computeDryLayout(BoxConstraints constraints) =>
+      _target(child!.getDryLayout(constraints.loosen()), constraints);
+  @override
+  void performLayout() {
+    child!.layout(constraints.loosen(), parentUsesSize: true);
+    final target = _target(child!.size, constraints);
+    if (target != child!.size) {
+      child!.layout(BoxConstraints.tight(target), parentUsesSize: true);
+    }
+    size = target;
   }
 }

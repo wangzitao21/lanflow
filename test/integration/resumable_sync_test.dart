@@ -138,10 +138,8 @@ void main() {
         (task) => task.item.id == large.item.id,
       );
       await phone.inbox.controlTransfer(paused, 'pause');
-      expect(
-        phone.inbox.syncProblems.map((target) => target.key),
-        contains(failed.endpoint),
-      );
+      expect(failed.errorCategory, 'source_pending');
+      expect(phone.inbox.syncProblems, isEmpty);
       await phone.inbox.store
           .blob(broken.item.digest)
           .writeAsBytes(await brokenFile.readAsBytes());

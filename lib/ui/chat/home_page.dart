@@ -50,6 +50,7 @@ import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/share_import_notice.dart';
 import 'share_receiver_page.dart';
 import 'attachment_selection_page.dart';
+import 'message_inline_editor.dart';
 
 part 'message_commands.dart';
 
@@ -112,7 +113,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   String? _editingConversation;
   final _pendingConversationNames = <String, String>{};
   final _conversationNameWrites = <String, Future<void>>{};
-  late final Future<void> Function() _commitUiEdits = _commitConversationNames;
+  InboxItem? _editingMessage;
+  final _messageText = TextEditingController();
+  final _messageName = TextEditingController();
+  Future<void>? _messageSave;
+  String? _messageEditError;
+  late final Future<void> Function() _commitUiEdits = _commitAllEdits;
+  Future<void> _commitAllEdits() async {
+    await _saveMessageEdit();
+    await _commitConversationNames();
+  }
+
   int _readingTransitions = 0;
   bool _creatingConversation = false;
   String? _draftConversation;
@@ -353,6 +364,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
           _favoriteBack!();
         } else if (_editingConversation != null) {
           unawaited(_finishRename(cancel: true));
+        } else if (_editingMessage != null) {
+          _cancelMessageEdit();
         } else if (_selection.active) {
           _selection.clear();
         } else if (_searchOpen) {
@@ -700,6 +713,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     _conversationNameFocus.removeListener(_conversationNameFocusChanged);
     _conversationNameFocus.dispose();
     _conversationName.dispose();
+    _messageText.dispose();
+    _messageName.dispose();
     _selection.removeListener(_selectionChanged);
     _selection.dispose();
     inbox.setReadingConversation(null);
@@ -741,6 +756,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   Future<T?> _dialog<T>({
     required BuildContext context,
     required WidgetBuilder builder,
+    bool immediate = false,
   }) async {
     if (widget.interactionsBlocked) return null;
     _desktopMenu.close();
@@ -753,8 +769,10 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       context: context,
       requestFocus: true,
       animationStyle: AnimationStyle(
-        duration: AppMotion.duration(context, 160),
-        reverseDuration: AppMotion.duration(context, 120),
+        duration: immediate ? Duration.zero : AppMotion.duration(context, 160),
+        reverseDuration: immediate
+            ? Duration.zero
+            : AppMotion.duration(context, 120),
         curve: AppMotion.curve,
       ),
       themes: InheritedTheme.capture(from: context, to: navigator.context),
@@ -989,6 +1007,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
         ],
         const MessageAction('quote', '引用', Icons.format_quote_rounded),
+        const MessageAction('edit', '修改', Icons.edit_outlined),
         if (lan.identityReady && item.originId == lan.identity.id)
           const MessageAction('details', '同步详情', Icons.info_outline_rounded),
         MessageAction(
@@ -1004,6 +1023,22 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // Dismissal is deliberately passive: the click that dismissed this menu
     // may have already focused the editor or opened another message's menu.
     if (!mounted || action == null) return;
+    if (action == 'edit') {
+      try {
+        await _saveMessageEdit();
+        if (!mounted) return;
+        if (viewer != null && viewer.isCurrent) Navigator.pop(context);
+        _messageText.text = item.text;
+        _messageName.text = item.name;
+        setState(() {
+          _editingMessage = item;
+          _messageEditError = null;
+        });
+      } on Object {
+        /* Keep the current edit visible until it can be saved. */
+      }
+      return;
+    }
     if (action == 'quote') {
       try {
         await inbox.setDraftQuote(MessageQuote.fromItem(item));
@@ -1093,23 +1128,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         if (mounted && viewer != null && viewer.isCurrent) {
           Navigator.pop(context);
         }
-        if (mounted) {
-          showAppMessage(
-            context,
-            '已删除，其他设备上线后也会同步删除',
-            duration: const Duration(seconds: 1),
-            action: SnackBarAction(
-              label: tr(context, inbox.linkFavoriteDeletion ? '恢复消息' : '撤销'),
-              onPressed: () async {
-                try {
-                  await inbox.restoreItem(item);
-                } on Object catch (error) {
-                  _toast(userError(error, fallback: '恢复失败，请重试'));
-                }
-              },
-            ),
-          );
-        }
       } on Object catch (error) {
         _toast(userError(error, fallback: '删除失败，请重试'));
       }
@@ -1122,6 +1140,45 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               : item.text,
         ),
       );
+    }
+  }
+
+  void _cancelMessageEdit() {
+    if (_messageSave != null) return;
+    setState(() {
+      _editingMessage = null;
+      _messageEditError = null;
+    });
+  }
+
+  Future<void> _saveMessageEdit() async {
+    if (_messageSave != null) return _messageSave!;
+    final item = _editingMessage;
+    if (item == null) return;
+    final text = _messageText.text;
+    final name = _messageName.text.trim();
+    if ((!item.isFile && text.trim().isEmpty) ||
+        (item.isFile && name.isEmpty)) {
+      setState(() => _messageEditError = item.isFile ? '文件名不能为空' : '消息不能为空');
+      throw StateError(_messageEditError!);
+    }
+    final operation = inbox.editMessage(item, text: text, name: name);
+    setState(() {
+      _messageSave = operation;
+      _messageEditError = null;
+    });
+    try {
+      await operation;
+      if (mounted) setState(() => _editingMessage = null);
+    } on Object catch (error) {
+      if (mounted) {
+        setState(
+          () => _messageEditError = userError(error, fallback: '修改未保存，请重试'),
+        );
+      }
+      rethrow;
+    } finally {
+      if (mounted) setState(() => _messageSave = null);
     }
   }
 
@@ -1404,6 +1461,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
 
   Future<void> _copyDetails(InboxEntry entry) => _dialog<void>(
     context: context,
+    immediate: true,
     builder: (_) => SyncDetails(
       inbox: inbox,
       entry: entry,
@@ -1581,11 +1639,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               const MessageAction('rename', '重命名', Icons.edit_outlined),
               const MessageAction('avatar', '更换头像', Icons.face_outlined),
               const MessageAction(
-                'background',
-                '会话背景颜色',
-                Icons.palette_outlined,
-              ),
-              const MessageAction(
                 'deleteConversation',
                 '删除',
                 Icons.delete_outline,
@@ -1609,9 +1662,6 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         await inbox.setConversationPinned(id, preference!.pinnedAt == null);
       }
       if (action == 'unread') await inbox.setConversationUnread(id, !unread);
-      if (action == 'background') {
-        if (mounted) await _conversationDialogs.background(context, id);
-      }
       if (action == 'avatar' && mounted) {
         await _conversationDialogs.avatar(context, id);
       }
@@ -1843,6 +1893,17 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       onOpen: _open,
       onLink: _openLink,
       onMenu: _itemMenu,
+      editor: _editingMessage?.id == entry.item.id
+          ? MessageInlineEditor(
+              text: _messageText,
+              name: entry.item.isFile ? _messageName : null,
+              saving: _messageSave != null,
+              error: _messageEditError,
+              onSave: () =>
+                  unawaited(_saveMessageEdit().catchError((Object _) {})),
+              onCancel: _cancelMessageEdit,
+            )
+          : null,
       onStatus: () => _copyDetails(entry),
       onQuote: (quote) async {
         InboxEntry? original;
@@ -1892,6 +1953,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         inbox.ready ? 0 : inbox.totalRecords,
       ),
       inbox.conversationId,
+      (_editingMessage?.id, _messageSave != null, _messageEditError),
       palette.blend,
       wide,
       inbox.endpoints.map((e) => e.key).join('|'),
@@ -2199,23 +2261,26 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
         child: Column(
           children: [
             if (error != null)
-              MaterialBanner(
-                content: Text(
-                  tr(context, userError(error, fallback: '操作失败，请重试')),
+              TransientNotice(
+                key: ValueKey(error),
+                child: MaterialBanner(
+                  content: Text(
+                    tr(context, userError(error, fallback: '操作失败，请重试')),
+                  ),
+                  actions: [
+                    TextButton(
+                      onPressed: _restart,
+                      child: Text(tr(context, '重试')),
+                    ),
+                    TextButton(
+                      onPressed: () => setState(() {
+                        inbox.error = null;
+                        lan.error = null;
+                      }),
+                      child: Text(tr(context, '关闭')),
+                    ),
+                  ],
                 ),
-                actions: [
-                  TextButton(
-                    onPressed: _restart,
-                    child: Text(tr(context, '重试')),
-                  ),
-                  TextButton(
-                    onPressed: () => setState(() {
-                      inbox.error = null;
-                      lan.error = null;
-                    }),
-                    child: Text(tr(context, '知道了')),
-                  ),
-                ],
               ),
             Expanded(
               child: IndexedStack(
@@ -2304,29 +2369,32 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
                               child: Column(
                                 children: [
                                   if (error != null)
-                                    MaterialBanner(
-                                      content: Text(
-                                        tr(
-                                          context,
-                                          userError(
-                                            error,
-                                            fallback: '操作失败，请重试',
+                                    TransientNotice(
+                                      key: ValueKey(error),
+                                      child: MaterialBanner(
+                                        content: Text(
+                                          tr(
+                                            context,
+                                            userError(
+                                              error,
+                                              fallback: '操作失败，请重试',
+                                            ),
                                           ),
                                         ),
+                                        actions: [
+                                          TextButton(
+                                            onPressed: _restart,
+                                            child: Text(tr(context, '重试')),
+                                          ),
+                                          TextButton(
+                                            onPressed: () => setState(() {
+                                              lan.error = null;
+                                              inbox.error = null;
+                                            }),
+                                            child: Text(tr(context, '关闭')),
+                                          ),
+                                        ],
                                       ),
-                                      actions: [
-                                        TextButton(
-                                          onPressed: _restart,
-                                          child: Text(tr(context, '重试')),
-                                        ),
-                                        TextButton(
-                                          onPressed: () => setState(() {
-                                            lan.error = null;
-                                            inbox.error = null;
-                                          }),
-                                          child: Text(tr(context, '知道了')),
-                                        ),
-                                      ],
                                     ),
                                   if (listOnly) ...[
                                     Expanded(

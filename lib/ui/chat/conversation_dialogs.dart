@@ -7,6 +7,7 @@ import 'package:lanflow/ui/shared/app_feedback.dart';
 import 'package:lanflow/ui/shared/chat_theme.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
+import 'package:lanflow/ui/shared/avatar_choices.dart';
 
 class ConversationDialogs {
   const ConversationDialogs({
@@ -123,9 +124,11 @@ class ConversationDialogs {
       return showDialog<T>(
         context: context,
         builder: (context) => Dialog(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 420),
-            child: builder(context),
+          alignment: Alignment.center,
+          insetPadding: const EdgeInsets.all(24),
+          child: SizedBox(
+            width: 420,
+            child: SingleChildScrollView(child: builder(context)),
           ),
         ),
       );
@@ -135,171 +138,88 @@ class ConversationDialogs {
       showDragHandle: true,
       isScrollControlled: true,
       useSafeArea: true,
-      builder: (context) => SafeArea(child: builder(context)),
+      builder: (context) =>
+          SafeArea(child: SingleChildScrollView(child: builder(context))),
     );
-  }
-
-  Future<void> background(BuildContext context, String id) async {
-    var selected = inbox.store.preference(id).background ?? -1;
-    final color = await _appearanceSheet<int>(
-      context,
-      (context) => StatefulBuilder(
-        builder: (context, change) {
-          final palette = ChatPalette.of(context);
-          return SingleChildScrollView(
-            child: Padding(
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  Text(
-                    tr(context, '会话背景颜色'),
-                    style: Theme.of(context).textTheme.titleMedium,
-                  ),
-                  const SizedBox(height: 20),
-                  Container(
-                    height: 96,
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      color: palette.conversationColor(
-                        selected == -1 ? null : selected,
-                      ),
-                      borderRadius: BorderRadius.circular(16),
-                    ),
-                    child: Row(
-                      children: [
-                        ConversationAvatar(
-                          id: id,
-                          avatar: inbox.store.preference(id).avatar,
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
-                          child: Text(
-                            inbox.store.conversations[id]?.name ??
-                                tr(context, '发给自己'),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  const SizedBox(height: 24),
-                  Wrap(
-                    spacing: 10,
-                    runSpacing: 12,
-                    children: [
-                      for (final option in const [
-                        ('默认', -1),
-                        ('浅绿', 0xFFDCEBDD),
-                        ('浅蓝', 0xFFDCE7F3),
-                        ('浅杏', 0xFFF5E8D5),
-                        ('浅粉', 0xFFF0DEDF),
-                        ('浅紫', 0xFFE6E0F0),
-                      ])
-                        Tooltip(
-                          message: tr(context, option.$1),
-                          child: Semantics(
-                            selected: selected == option.$2,
-                            button: true,
-                            label: tr(context, option.$1),
-                            child: InkWell(
-                              onTap: () => change(() => selected = option.$2),
-                              borderRadius: BorderRadius.circular(28),
-                              child: Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  shape: BoxShape.circle,
-                                  color: palette.conversationColor(
-                                    option.$2 == -1 ? null : option.$2,
-                                  ),
-                                  border: Border.all(
-                                    color: selected == option.$2
-                                        ? brandGreen
-                                        : palette.divider,
-                                    width: 2,
-                                  ),
-                                ),
-                                child: selected == option.$2
-                                    ? const Icon(Icons.check, color: brandGreen)
-                                    : null,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                  const SizedBox(height: 24),
-                  FilledButton(
-                    onPressed: () => Navigator.pop(context, selected),
-                    child: Text(tr(context, '完成')),
-                  ),
-                ],
-              ),
-            ),
-          );
-        },
-      ),
-    );
-    if (color != null) {
-      await inbox.setConversationBackground(id, color == -1 ? null : color);
-    }
   }
 
   Future<void> avatar(BuildContext context, String id) async {
-    final result = await _appearanceSheet<String>(
+    var selected = inbox.conversationAvatar(id);
+    var color = inbox.conversationAvatarColor(id);
+    final result = await _appearanceSheet<bool>(
       context,
-      (context) => Padding(
-        padding: const EdgeInsets.fromLTRB(24, 12, 24, 24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text(
-              tr(context, '更换头像'),
-              style: Theme.of(context).textTheme.titleMedium,
-            ),
-            const SizedBox(height: 20),
-            Wrap(
-              spacing: 16,
-              runSpacing: 18,
-              children: [
-                for (final entry in conversationIcons.entries)
-                  Semantics(
-                    selected: inbox.store.preference(id).avatar == entry.key,
-                    child: InkWell(
-                      key: ValueKey('conversation-avatar-${entry.key}'),
-                      borderRadius: AppCorners.border,
-                      onTap: () => Navigator.pop(context, entry.key),
-                      child: SizedBox(
-                        width: 64,
+      (context) => StatefulBuilder(
+        builder: (context, change) => Padding(
+          key: const ValueKey('conversation-avatar-editor'),
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text(
+                tr(context, '更换头像'),
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+              const SizedBox(height: 20),
+              AvatarOptionGrid(
+                children: [
+                  for (final entry in conversationIcons.entries)
+                    Semantics(
+                      selected: selected == entry.key,
+                      child: InkWell(
+                        key: ValueKey('conversation-avatar-${entry.key}'),
+                        borderRadius: AppCorners.border,
+                        onTap: () => change(() => selected = entry.key),
                         child: Column(
                           children: [
                             ConversationAvatar(
                               id: id,
                               avatar: entry.key,
+                              color: color,
                               size: 48,
                             ),
                             const SizedBox(height: 6),
-                            Text(tr(context, entry.value.$1)),
+                            Text(
+                              tr(context, entry.value.$1),
+                              style: TextStyle(
+                                fontWeight: selected == entry.key
+                                    ? FontWeight.bold
+                                    : FontWeight.normal,
+                              ),
+                            ),
                           ],
                         ),
                       ),
                     ),
-                  ),
-              ],
-            ),
-            const SizedBox(height: 20),
-            TextButton(
-              onPressed: () => Navigator.pop(context, ''),
-              child: Text(tr(context, '恢复默认头像')),
-            ),
-          ],
+                ],
+              ),
+              const SizedBox(height: 20),
+              Text(tr(context, '头像颜色')),
+              const SizedBox(height: 12),
+              AvatarColorChoices(
+                selected: color,
+                keyPrefix: 'conversation-avatar-color',
+                onChanged: (value) => change(() => color = value),
+              ),
+              const SizedBox(height: 20),
+              FilledButton(
+                onPressed: () => Navigator.pop(context, true),
+                child: Text(tr(context, '完成')),
+              ),
+              TextButton(
+                onPressed: () => change(() {
+                  selected = null;
+                  color = null;
+                }),
+                child: Text(tr(context, '恢复默认头像')),
+              ),
+            ],
+          ),
         ),
       ),
     );
-    if (result != null) {
-      await inbox.setConversationAvatar(id, result.isEmpty ? null : result);
+    if (result == true) {
+      await inbox.setConversationAvatar(id, selected, color: color);
     }
   }
 

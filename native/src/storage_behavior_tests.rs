@@ -1,6 +1,39 @@
 use super::*;
 
 #[test]
+fn device_appearance_survives_rename_replay_and_reset() {
+    let root = crate::tests::root();
+    let owner = "device-appearance-test";
+    let changed = dispatch(json!({"op":"profile","root":root,"id":owner,
+        "name":"Desktop","avatar":"","avatarPreset":"linux","avatarColor":0xFF7E63B5u32})).unwrap();
+    assert_eq!(changed["profiles"][owner]["avatarPreset"], "linux");
+    let renamed = dispatch(json!({"op":"profile","root":root,"id":owner,"name":"Renamed"})).unwrap();
+    assert_eq!(renamed["profiles"][owner]["avatarPreset"], "linux");
+    assert_eq!(renamed["profiles"][owner]["avatarColor"], 0xFF7E63B5u32);
+
+    let target = crate::tests::root();
+    let profile = renamed["profiles"][owner].clone();
+    dispatch(json!({"op":"apply","root":target,"event":{"id":"profile-replay-valid",
+        "type":"profile","profile":profile}})).unwrap();
+    for (index, patch) in [json!({"avatarPreset":"unknown"}), json!({"avatarPreset":7}),
+        json!({"avatarColor":-1}), json!({"avatarColor":4294967296u64})].into_iter().enumerate() {
+        let mut invalid = profile.clone();
+        for (key, value) in patch.as_object().unwrap() { invalid[key] = value.clone(); }
+        invalid["revision"] = json!(profile["revision"].as_i64().unwrap() + 1);
+        assert!(dispatch(json!({"op":"apply","root":target,"event":{
+            "id":format!("profile-invalid-{index}"),"type":"profile","profile":invalid}})).is_err());
+    }
+    let unchanged = dispatch(json!({"op":"snapshot","root":target})).unwrap();
+    assert_eq!(unchanged["profiles"][owner], profile);
+    let reset = dispatch(json!({"op":"profile","root":root,"id":owner,"name":"Renamed",
+        "avatarPreset":null,"avatarColor":null})).unwrap();
+    assert!(reset["profiles"][owner]["avatarPreset"].is_null());
+    assert!(reset["profiles"][owner]["avatarColor"].is_null());
+    crate::tests::cleanup(&root);
+    crate::tests::cleanup(&target);
+}
+
+#[test]
 fn storage_totals_include_recovered_edits_and_other_files_without_clearing_them() {
     let root = crate::tests::root();
     initialize(&root).unwrap();
@@ -338,7 +371,7 @@ fn retry_deadlines_and_error_categories_survive_restart_and_pause_wins_over_prog
 }
 
 #[test]
-fn local_favorites_ignore_missing_items_deduplicate_and_remain_independent_of_restore() {
+fn local_favorites_deduplicate_and_deletion_clears_the_old_favorite_on_restore() {
     let root = crate::tests::root();
     let item = note(1);
     dispatch(json!({"op":"add","root":root,"item":item})).unwrap();
@@ -352,14 +385,14 @@ fn local_favorites_ignore_missing_items_deduplicate_and_remain_independent_of_re
     let restored = dispatch(json!({"op":"restore","root":root,"id":item["id"]})).unwrap();
     let new_id = restored["entries"][0]["item"]["id"].as_str().unwrap();
     assert_ne!(new_id, item["id"]);
-    assert!(restored["favorites"][new_id].is_null());
+    assert_eq!(restored["favorites"][new_id]["value"],true);
     assert_eq!(
         restored["favorites"][item["id"].as_str().unwrap()]["value"],
-        true
+        false
     );
     let favorites =
         dispatch(json!({"op":"search_messages","root":root,"favoritesOnly":true})).unwrap();
-    assert_eq!(favorites["ids"], json!([]));
+    assert_eq!(favorites["ids"], json!([new_id]));
     crate::tests::cleanup(&root);
 }
 

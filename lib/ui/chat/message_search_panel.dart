@@ -466,18 +466,41 @@ class _MessageSearchPanelState extends State<MessageSearchPanel> {
                                       MessageKind.video => Icons.movie_outlined,
                                       _ => Icons.insert_drive_file_outlined,
                                     }),
-                              title: HighlightedText(
-                                searchExcerpt(
-                                  item.isFile ? item.name : item.text,
-                                  _resultQuery,
-                                ),
-                                query: _resultQuery,
-                                maxLines: _sidebar ? 2 : 3,
-                                style: Theme.of(context).textTheme.bodyMedium,
+                              title: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Text(
+                                    _conversationNames[item.conversationId] ??
+                                        tr(context, '同步中的会话'),
+                                    key: ValueKey(
+                                      'search-conversation-${item.id}',
+                                    ),
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context)
+                                        .textTheme
+                                        .titleSmall
+                                        ?.copyWith(fontWeight: FontWeight.w600),
+                                  ),
+                                  const SizedBox(height: 4),
+                                  HighlightedText(
+                                    searchExcerpt(
+                                      item.isFile ? item.name : item.text,
+                                      _resultQuery,
+                                    ),
+                                    query: _resultQuery,
+                                    maxLines: _sidebar ? 2 : 3,
+                                    style: Theme.of(
+                                      context,
+                                    ).textTheme.bodyMedium,
+                                  ),
+                                ],
                               ),
                               subtitle: Text(
-                                '${_conversationNames[item.conversationId] ?? tr(context, '同步中的会话')} · '
-                                '${item.createdAt.toLocal().toString().substring(0, 16)}',
+                                item.createdAt.toLocal().toString().substring(
+                                  0,
+                                  16,
+                                ),
                                 maxLines: 2,
                                 overflow: TextOverflow.ellipsis,
                               ),

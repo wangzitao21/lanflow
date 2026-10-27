@@ -7,7 +7,7 @@ import '../support/widget_harness.dart';
 
 void main() {
   final harness = WidgetTestHarness();
-  testWidgets('conversation menu toggles pins, unread marks and row colors', (
+  testWidgets('conversation menu preserves pins and unread marks without background colors', (
     tester,
   ) async {
     late Conversation work;
@@ -44,11 +44,9 @@ void main() {
     expect(find.byKey(ValueKey('unread-${work.id}')), findsOneWidget);
     await menu();
     expect(find.text('标为已读'), findsOneWidget);
-    await choose('会话背景颜色');
-    await tester.tap(find.byTooltip('浅蓝'));
+    expect(find.text('会话背景颜色'), findsNothing);
+    await tester.tapAt(const Offset(1170,760));
     await tester.pumpAndSettle();
-    await choose('完成');
-    expect(harness.inbox.store.preference(work.id).background, 0xFFDCE7F3);
     await tester.tap(row);
     await tester.pumpAndSettle();
     expect(find.byKey(ValueKey('unread-${work.id}')), findsNothing);

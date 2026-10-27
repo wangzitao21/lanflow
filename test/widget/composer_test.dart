@@ -35,7 +35,13 @@ void main() {
       });
       await tester.pumpAndSettle();
       expect(harness.inbox.items.single.item.text, '在地铁上想到的新想法');
-      expect(find.text('已保存到本机'), findsOneWidget);
+      expect(find.text('消息详情'), findsNothing);
+      expect(
+        find.byKey(
+          ValueKey('sync-badge-${harness.inbox.items.single.item.id}'),
+        ),
+        findsOneWidget,
+      );
       expect(find.text('接收'), findsNothing);
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());

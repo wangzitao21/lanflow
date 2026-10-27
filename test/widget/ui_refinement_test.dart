@@ -28,7 +28,7 @@ void main() {
         status.needsAttention = true;
         harness.inbox.activity.value++;
         await tester.pump();
-        expect(find.text('1/1 台在线'), findsOneWidget);
+        expect(find.text('已绑定 1 台设备'), findsNWidgets(2));
         expect(find.text('同步失败'), findsNothing);
         expect(find.textContaining('正在同步'), findsNothing);
       }
@@ -39,6 +39,7 @@ void main() {
         harness.inbox.activity.value++;
         await tester.pump();
         expect(find.text('已连接'), findsOneWidget);
+        expect(find.text('同步未完成，可在此重试'), findsNothing);
         expect(find.textContaining('正在同步'), findsNothing);
       }
       await tester.pumpWidget(const SizedBox.shrink());

@@ -1,4 +1,4 @@
-param(
+﻿param(
     [ValidateSet('all', 'windows', 'android', 'nas', 'check')]
     [string]$Target = 'all',
     [switch]$SkipSetup,
@@ -10,8 +10,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $projectRoot = Split-Path -Parent $PSScriptRoot
-$toolRoot = Join-Path $projectRoot '.tooling'
-$downloads = Join-Path $toolRoot 'downloads'
+$sourceRoot = $projectRoot
+$toolRoot = if ($env:WINDOWS_BUILD_TOOLS_HOME) {
+    [IO.Path]::GetFullPath($env:WINDOWS_BUILD_TOOLS_HOME)
+} else {
+    Join-Path ([Environment]::GetFolderPath('MyDocuments')) 'BuildTools'
+}
 $flutter = Join-Path $toolRoot 'flutter/bin/flutter.bat'
 $platformLinks = [System.Collections.Generic.List[string]]::new()
 Set-Location -LiteralPath $projectRoot
@@ -53,7 +57,9 @@ function Remove-PlatformLinks {
 }
 
 function Initialize-WindowsEnvironment {
-    $env:PUB_CACHE = Join-Path $projectRoot '.pub-cache'
+    $env:WINDOWS_BUILD_TOOLS_HOME = $toolRoot
+    $env:FLUTTER_ROOT = Join-Path $toolRoot 'flutter'
+    $env:PUB_CACHE = Join-Path $toolRoot 'pub-cache'
     $env:CARGO_BUILD_JOBS = "$Jobs"
     $env:CMAKE_BUILD_PARALLEL_LEVEL = "$Jobs"
     $env:DOTNET_PROCESSOR_COUNT = "$Jobs"
@@ -61,7 +67,7 @@ function Initialize-WindowsEnvironment {
     $env:CI = 'true'
     $env:FLUTTER_SUPPRESS_ANALYTICS = 'true'
     $env:DASH__SUPPRESS_ANALYTICS = 'true'
-    $env:TEMP = Join-Path $toolRoot 'test-temp'
+    $env:TEMP = Join-Path $toolRoot 'temp/lanflow'
     $env:TMP = $env:TEMP
     New-Item -ItemType Directory -Path $env:TEMP -Force | Out-Null
     [System.Diagnostics.Process]::GetCurrentProcess().PriorityClass = 'BelowNormal'
@@ -69,42 +75,19 @@ function Initialize-WindowsEnvironment {
 
 function Install-WindowsFlutter {
     if (Test-Path -LiteralPath $flutter -PathType Leaf) { return }
-    $sdkRoot = Assert-PortablePath (Join-Path $toolRoot 'flutter')
-    if (Test-Path -LiteralPath $sdkRoot) {
-        throw "The Windows Flutter SDK is incomplete at $sdkRoot. Move that directory aside and run without -SkipSetup."
-    }
-    New-Item -ItemType Directory -Path $downloads -Force | Out-Null
-    $archive = Join-Path $downloads 'flutter_windows_3.47.7-stable.zip'
-    # Pinned to the same Flutter release as WSL, using the official release manifest.
-    $expectedHash = 'c2c875da25a1a1448d18ee4e8f398b2f6fce888b4775d8f9130538e16d826cb4'
-    if (!(Test-Path -LiteralPath $archive -PathType Leaf) -or
-        (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash -ne $expectedHash) {
-        Write-Host 'Downloading Flutter 3.47.7 for Windows...'
-        $pending = "$archive.pending"
-        Invoke-WebRequest -Uri 'https://storage.googleapis.com/flutter_infra_release/releases/stable/windows/flutter_windows_3.47.7-stable.zip' -OutFile $pending -UseBasicParsing
-        if ((Get-FileHash -LiteralPath $pending -Algorithm SHA256).Hash -ne $expectedHash) {
-            throw 'Windows Flutter archive checksum verification failed; the SDK was not installed.'
-        }
-        Move-Item -LiteralPath $pending -Destination $archive -Force
-    }
-    $staging = Assert-PortablePath (Join-Path $toolRoot ('flutter-setup-' + [guid]::NewGuid().ToString('N').Substring(0, 8)))
-    try {
-        New-Item -ItemType Directory -Path $staging | Out-Null
-        Expand-Archive -LiteralPath $archive -DestinationPath $staging
-        $extracted = Join-Path $staging 'flutter'
-        if (!(Test-Path -LiteralPath (Join-Path $extracted 'bin/flutter.bat') -PathType Leaf)) {
-            throw 'The Windows Flutter archive does not contain the expected SDK.'
-        }
-        Move-Item -LiteralPath (Assert-PortablePath $extracted) -Destination $sdkRoot
-    } finally {
-        if (Test-Path -LiteralPath $staging) {
-            Remove-Item -LiteralPath (Assert-PortablePath $staging) -Recurse -Force
-        }
-    }
+    throw 'Shared Windows Flutter is missing. Automatic Windows toolchain installation is disabled; restore the shared BuildTools environment first.'
 }
 
 function Build-WindowsCore {
     Invoke-LinuxBuild 'windows-core'
+    if ($projectRoot -ne $sourceRoot) {
+        $library = Join-Path $sourceRoot 'build/native/lanflow_core.dll'
+        $destination = Join-Path $projectRoot 'build/native/lanflow_core.dll'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $destination) -Force | Out-Null
+        if (!(Test-Path -LiteralPath $destination) -or (Get-FileHash -LiteralPath $library).Hash -ne (Get-FileHash -LiteralPath $destination).Hash) {
+            Copy-Item -LiteralPath $library -Destination $destination -Force
+        }
+    }
 }
 
 function Invoke-Flutter([string[]]$FlutterArguments) {
@@ -127,12 +110,19 @@ function Set-PluginLinks {
     foreach ($plugin in $plugins.plugins.windows) {
         if ($plugin.name -notmatch '^[a-z0-9_]+$') { throw 'Invalid plugin name' }
         $source = [System.IO.Path]::GetFullPath($plugin.path)
-        if (!$source.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Plugin must be inside the project package cache' }
+        if (!$source.StartsWith($cacheRoot, [StringComparison]::OrdinalIgnoreCase)) { throw 'Plugin must be inside the configured shared package cache' }
         $destination = Join-Path $linkRoot $plugin.name
-        if (!(Test-Path -LiteralPath $destination)) {
-            # NTFS directory junctions work for Flutter plugins without changing Developer Mode.
-            New-Item -ItemType Junction -Path $destination -Target $source | Out-Null
+        $existing = Get-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+        if ($existing) {
+            if ($existing.LinkType -notin @('Junction', 'SymbolicLink')) {
+                throw "Plugin link path contains an ordinary directory: $destination"
+            }
+            $oldTarget = [IO.Path]::GetFullPath(@($existing.Target)[0]).TrimEnd('\')
+            if ($oldTarget -eq $source.TrimEnd('\')) { continue }
+            # Remove only the link, preserving the previous package directory.
+            [IO.Directory]::Delete($destination)
         }
+        New-Item -ItemType Junction -Path $destination -Target $source | Out-Null
     }
 }
 
@@ -189,32 +179,8 @@ function Test-WindowsNative {
 }
 
 function Install-WindowsTools {
-    if (Find-VisualStudio) {
-        Write-Host 'Windows C++ build tools are available.'
-        return
-    }
-    Write-Host 'Downloading Microsoft Visual Studio 2022 Build Tools...'
-    $installer = Join-Path $downloads 'vs_BuildTools.exe'
-    Invoke-WebRequest -Uri 'https://aka.ms/vs/17/release/vs_BuildTools.exe' -OutFile $installer -UseBasicParsing
-    $signature = Get-AuthenticodeSignature -LiteralPath $installer
-    if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch 'CN=Microsoft Corporation') {
-        throw 'Microsoft installer signature could not be verified'
-    }
-    $installPath = Join-Path $env:LOCALAPPDATA 'BuildTools/visual-studio'
-    $arguments = @('--quiet', '--wait', '--norestart', '--nocache', '--installPath', ('"' + $installPath + '"'), '--add', 'Microsoft.VisualStudio.Workload.VCTools', '--includeRecommended')
-    $startOptions = @{
-        FilePath = $installer
-        ArgumentList = $arguments
-        WindowStyle = 'Hidden'
-        Wait = $true
-        PassThru = $true
-    }
-    $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
-    if (!$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { $startOptions.Verb = 'RunAs' }
-    $process = Start-Process @startOptions
-    if ($process.ExitCode -notin @(0, 3010)) { throw "Visual Studio installation failed: $($process.ExitCode)" }
-    if (!(Find-VisualStudio)) { throw 'Visual Studio C++ tools are still unavailable after installation' }
-    if ($process.ExitCode -eq 3010) { Write-Warning 'The installer reports a pending restart. A build will be attempted without restarting.' }
+    if (Find-VisualStudio) { return }
+    throw 'Shared Windows C++ build tools are missing. Automatic Windows toolchain installation is disabled; restore the shared MSVC, CMake and desktop SDK first.'
 }
 
 function Invoke-Debian([string[]]$Arguments) {
@@ -222,7 +188,7 @@ function Invoke-Debian([string[]]$Arguments) {
     try {
         # WSL startup notices on stderr are not command failures in PowerShell 5.1.
         $ErrorActionPreference = 'Continue'
-        & wsl.exe --distribution Debian @Arguments
+        & wsl.exe --distribution Debian --cd '~' @Arguments
         $code = $LASTEXITCODE
     } finally { $ErrorActionPreference = $previous }
     if ($code -ne 0) { throw "Debian build command failed ($code)" }
@@ -230,7 +196,7 @@ function Invoke-Debian([string[]]$Arguments) {
 
 function Invoke-LinuxBuild([string]$LinuxTarget) {
     $LinuxTarget = $LinuxTarget.ToLowerInvariant()
-    $linuxRoot = @(Invoke-Debian @('--exec', 'wslpath', '-a', $projectRoot))[-1].Trim()
+    $linuxRoot = @(Invoke-Debian @('--exec', 'wslpath', '-a', $sourceRoot))[-1].Trim()
     if (!$linuxRoot.StartsWith('/')) { throw 'Unable to resolve the project path in Debian' }
     if (!$SkipSetup) {
         Invoke-Debian @('--user', 'root', '--exec', '/bin/bash', "$linuxRoot/scripts/wsl-setup.sh", '--system')
@@ -246,6 +212,44 @@ function Invoke-LinuxBuild([string]$LinuxTarget) {
         '/bin/bash', "$linuxRoot/scripts/wsl-build.sh", $linuxRoot, $LinuxTarget, $setupArgument, $testArgument, "$Jobs"
     )
 
+}
+
+function Initialize-WindowsBuildWorkspace {
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try { $id = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($sourceRoot.ToLowerInvariant()))).Replace('-', '').Substring(0, 12).ToLowerInvariant() }
+    finally { $hasher.Dispose() }
+    $sharedPrefix = [IO.Path]::GetFullPath($toolRoot).TrimEnd('\') + '\'
+    $buildHome = Join-Path $toolRoot ('projects/lanflow-' + $id)
+    $buildSource = [IO.Path]::GetFullPath((Join-Path $buildHome 'source'))
+    if (!$buildSource.StartsWith($sharedPrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Build workspace escaped the shared tool directory.' }
+    $cursor = $buildSource
+    while ($cursor.StartsWith($sharedPrefix, [StringComparison]::OrdinalIgnoreCase)) {
+        $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
+        if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw "Build workspace contains a link: $cursor" }
+        $cursor = [IO.Path]::GetDirectoryName($cursor)
+    }
+    $marker = Join-Path $buildHome '.source-root'
+    if (Test-Path -LiteralPath $marker) {
+        if ([IO.File]::ReadAllText($marker).Trim() -ne $sourceRoot) { throw 'Build workspace belongs to another project.' }
+    } else {
+        if ((Test-Path -LiteralPath $buildSource) -and (Get-ChildItem -LiteralPath $buildSource -Force)) { throw 'Refusing to synchronize over an unowned build workspace.' }
+        New-Item -ItemType Directory -Path $buildHome -Force | Out-Null
+        [IO.File]::WriteAllText($marker, $sourceRoot, [Text.UTF8Encoding]::new($false))
+    }
+    New-Item -ItemType Directory -Path $buildSource -Force | Out-Null
+    foreach ($directory in @('lib', 'native', 'platforms', 'scripts', 'test', 'assets')) {
+        $source = Join-Path $sourceRoot $directory
+        if (!(Test-Path -LiteralPath $source -PathType Container)) { continue }
+        $destination = [IO.Path]::GetFullPath((Join-Path $buildSource $directory))
+        if (!$destination.StartsWith($buildSource + '\', [StringComparison]::OrdinalIgnoreCase)) { throw 'Unexpected synchronization destination.' }
+        $messages = @(& robocopy.exe $source $destination /MIR /XJ /R:1 /W:1 /NFL /NDL /NJH /NJS /NP /XD .git build target .gradle .kotlin .cxx ephemeral jniLibs /XF key.properties local.properties '*.jks' '*.keystore')
+        if ($LASTEXITCODE -ge 8) { throw "Windows source synchronization failed: $($messages -join ' ')" }
+    }
+    foreach ($file in @('pubspec.yaml', 'pubspec.lock', 'analysis_options.yaml', '.gitignore', '.gitattributes')) {
+        Copy-Item -LiteralPath (Join-Path $sourceRoot $file) -Destination (Join-Path $buildSource $file) -Force
+    }
+    Write-Host "Shared Windows build workspace: $buildSource"
+    return $buildSource
 }
 
 function Invoke-Package {
@@ -268,9 +272,10 @@ function Invoke-Package {
     }
     if (!$buildWindows) { return }
     if (!$SkipSetup) {
-        New-Item -ItemType Directory -Path $downloads -Force | Out-Null
         Install-WindowsTools
     }
+    $script:projectRoot = Initialize-WindowsBuildWorkspace
+    Set-Location -LiteralPath $projectRoot
     Build-WindowsCore
     Set-PlatformLinks
     Invoke-WindowsPubGet
@@ -286,6 +291,20 @@ function Invoke-Package {
 
     if ($Target -in @('all', 'windows')) {
         $symbols = Join-Path $projectRoot "build/symbols/$version/windows-x64"
+        # Flutter's release asset target can retain an old tree-shaken font when
+        # only Dart icon references change. Rebuild this target for every package.
+        $assetCache = [IO.Path]::GetFullPath((Join-Path $projectRoot '.dart_tool/flutter_build'))
+        $workspacePrefix = [IO.Path]::GetFullPath($projectRoot).TrimEnd('\') + '\'
+        if (!$assetCache.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) { throw 'Asset cache escaped the build workspace.' }
+        if (Test-Path -LiteralPath $assetCache) {
+            foreach ($cache in Get-ChildItem -LiteralPath $assetCache -Directory) {
+                if ($cache.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unexpected asset cache link.' }
+                foreach ($stamp in Get-ChildItem -LiteralPath $cache.FullName -File -Filter 'release_bundle_windows-*_assets.stamp') {
+                    if ($stamp.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Unexpected asset stamp link.' }
+                    Remove-Item -LiteralPath $stamp.FullName -Force
+                }
+            }
+        }
         Invoke-Flutter @('build', 'windows', '--release', '--no-pub', "--split-debug-info=$symbols")
         $release = Join-Path $projectRoot 'build\windows\x64\runner\Release'
         $releaseIcons = Join-Path $release 'data/flutter_assets/fonts/MaterialIcons-Regular.otf'
@@ -321,7 +340,7 @@ function Invoke-Package {
         Move-Item -LiteralPath $pendingZip -Destination $zipOutput -Force
         New-Item -ItemType Directory -Path $windowsOutput -Force | Out-Null
         try {
-            $published = Copy-PortableRelease $release $windowsOutput
+            $published = Copy-PortableRelease $release $windowsOutput -SourceWorkspace $projectRoot
             Write-Host "Portable directory verified: $($published.Files) files; $($published.Updated) updated."
         } catch [System.IO.IOException] {
             if (($_.Exception.HResult -band 0xffff) -notin @(32, 33, 1224)) { throw }
@@ -352,14 +371,14 @@ try {
         Start-Transcript -LiteralPath $logPath | Out-Null
         $transcriptStarted = $true
         Write-Host 'LanFlow：正在准备 Windows、安卓和 NAS 构建包。' -ForegroundColor Cyan
-        Write-Host 'Rust、安卓与 NAS 在 Debian WSL 编译，Windows 界面在 Windows 编译。'
+        Write-Host 'Rust、安卓与 NAS 使用 Debian 共享工具；Windows 界面使用系统共享工具。'
         Write-Host "默认最多使用 $Jobs 核；WSL 编译内存上限 $MemoryGB GiB。"
     }
     Invoke-Package
     Remove-PlatformLinks
     if ($Interactive) {
         Write-Host '打包成功！最新安装包位于：' -ForegroundColor Green
-        Write-Host (Join-Path $projectRoot 'artifacts')
+        Write-Host (Join-Path $sourceRoot 'artifacts')
     }
 } catch {
     if (!$Interactive) { throw }

@@ -18,17 +18,23 @@ class ConversationAvatar extends StatelessWidget {
     super.key,
     required this.id,
     this.avatar,
+    this.color,
     this.size = 42,
   });
   final String id;
   final String? avatar;
+  final int? color;
   final double size;
   @override
   Widget build(BuildContext context) => Container(
     width: size,
     height: size,
     decoration: BoxDecoration(
-      color: id == defaultConversationId ? brandGreen : const Color(0xFF5B88AE),
+      color: color != null
+          ? Color(color!)
+          : id == defaultConversationId
+          ? brandGreen
+          : const Color(0xFF5B88AE),
       borderRadius: AppCorners.border,
     ),
     child: Icon(

@@ -28,7 +28,7 @@ void main() {
   }
 
   test(
-    'independent favorites survive multi-delete and conversation restore across devices',
+    'global deletion and restoration keep favorites attached to the current message across devices',
     () async {
       final a = await create('source');
       final b = await create('target');
@@ -57,15 +57,15 @@ void main() {
         (e) => e.item.text == first.item.text,
       );
       expect(restored.item.id, isNot(first.item.id));
-      expect(a.inbox.isFavorite(restored.item.id), isFalse);
-      expect(a.inbox.favoriteEntries.length, 2);
+      expect(a.inbox.isFavorite(restored.item.id), isTrue);
+      expect(a.inbox.favoriteEntries.length, 1);
       await a.inbox.syncNow();
-      expect(b.inbox.isFavorite(restored.item.id), isFalse);
-      expect(b.inbox.favoriteEntries.length, 2);
+      expect(b.inbox.isFavorite(restored.item.id), isTrue);
+      expect(b.inbox.favoriteEntries.length, 1);
       await a.inbox.setFavorites([first.item.id], false);
       await a.inbox.syncNow();
       expect(b.inbox.isFavorite(first.item.id), isFalse);
-      expect(b.inbox.favoriteEntries.single.originalMessageId, second.item.id);
+      expect(b.inbox.favoriteEntries.single.originalMessageId, restored.item.id);
     },
   );
 

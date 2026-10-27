@@ -42,6 +42,11 @@ class FavoriteDetail extends StatefulWidget {
 }
 
 class FavoriteDetailState extends State<FavoriteDetail> {
+  FavoriteEntry get _entry =>
+      widget.inbox.favoriteEntries
+          .where((entry) => entry.id == widget.entry.id)
+          .firstOrNull ??
+      widget.entry;
   late final _actions = FavoriteActions(widget.inbox);
   Future<File>? _image;
   Object? _imageKey;
@@ -56,14 +61,14 @@ class FavoriteDetailState extends State<FavoriteDetail> {
   }
 
   Future<File> _imageFile() {
-    final key = (widget.inbox, widget.entry.id, widget.entry.item.digest);
+    final key = (widget.inbox, _entry.id, _entry.item.digest);
     final revision = widget.inbox.store.favoritesRevision;
     if (_imageKey != key || (_imageFailed && _imageRevision != revision)) {
       _imageKey = key;
       _imageRevision = revision;
       _imageFailed = false;
       _image = widget.inbox
-          .favoriteFileForExport(widget.entry)
+          .favoriteFileForExport(_entry)
           .then(
             (file) => file,
             onError: (Object error, StackTrace stack) {
@@ -101,7 +106,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
     if (_busy) return;
     File? file;
     await _run(() async {
-      file = await widget.inbox.favoriteFileForExport(widget.entry);
+      file = await widget.inbox.favoriteFileForExport(_entry);
       return true;
     }, fallback: '无法打开附件，请重试');
     if (!mounted || file == null) return;
@@ -109,7 +114,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
       MaterialPageRoute<void>(
         builder: (viewerContext) => ImageViewer(
           file: file!,
-          name: widget.entry.item.name,
+          name: _entry.item.name,
           onMenu: (point) => unawaited(_imageMenu(viewerContext, point)),
         ),
       ),
@@ -124,7 +129,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
     );
     if (!mounted || action != 'save') return;
     await _run(
-      () => _actions.saveFile(widget.entry),
+      () => _actions.saveFile(_entry),
       success: '文件已保存',
       fallback: '文件保存失败，请重试',
     );
@@ -133,7 +138,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
   Future<void> _locate() async {
     try {
       final original = await widget.inbox.store.loadEntry(
-        widget.entry.originalMessageId,
+        _entry.originalMessageId,
       );
       if (!mounted || original == null || widget.onLocate == null) return;
       widget.onBack();
@@ -172,13 +177,40 @@ class FavoriteDetailState extends State<FavoriteDetail> {
   Widget build(BuildContext context) => AnimatedBuilder(
     animation: widget.inbox,
     builder: (context, _) {
-      final item = widget.entry.item;
-      final originalExists = widget.inbox.store.originalExists(widget.entry);
+      if (!widget.inbox.favoriteEntries.any(
+        (entry) => entry.id == widget.entry.id,
+      )) {
+        return AppPanel(
+          title: '收藏详情',
+          embedded: widget.embedded,
+          onClose: requestBack,
+          actions: [
+            TextButton(
+              onPressed: requestBack,
+              child: Text(tr(context, '返回收藏')),
+            ),
+          ],
+          child: Center(
+            child: Text(
+              tr(
+                context,
+                widget.inbox.store.deleted.contains(
+                      widget.entry.originalMessageId,
+                    )
+                    ? '消息已删除'
+                    : '已取消收藏',
+              ),
+            ),
+          ),
+        );
+      }
+      final item = _entry.item;
+      final originalExists = widget.inbox.store.originalExists(_entry);
       final palette = ChatPalette.of(context);
       return PopScope(
         canPop: !_busy,
         child: AppPanel(
-          key: ValueKey('favorite-detail-${widget.entry.id}'),
+          key: ValueKey('favorite-detail-${_entry.id}'),
           title: tr(context, '收藏详情'),
           embedded: widget.embedded,
           onClose: requestBack,
@@ -191,7 +223,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
               onPressed: _busy
                   ? null
                   : () => _run(() async {
-                      await _actions.copy(widget.entry);
+                      await _actions.copy(_entry);
                       return true;
                     }, success: '已复制'),
               icon: const Icon(Icons.content_copy_outlined, size: 18),
@@ -205,7 +237,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
                     : item.kind == MessageKind.image
                     ? _openImage
                     : () => _run(() async {
-                        await _actions.openFile(widget.entry);
+                        await _actions.openFile(_entry);
                         return true;
                       }, fallback: '无法打开附件，请重试'),
                 icon: Icon(
@@ -223,7 +255,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
                 onPressed: _busy
                     ? null
                     : () => _run(
-                        () => _actions.saveFile(widget.entry),
+                        () => _actions.saveFile(_entry),
                         success: '文件已保存',
                         fallback: '文件保存失败，请重试',
                       ),
@@ -236,7 +268,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
               onPressed: _busy
                   ? null
                   : () => _run(
-                      () => _actions.export([widget.entry]),
+                      () => _actions.export([_entry]),
                       success: '已导出收藏',
                       fallback: '收藏导出失败，请重试',
                     ),
@@ -292,7 +324,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
                       Text(
-                        '${item.originName} · ${tr(context, '收藏于 {date}', {'date': favoriteTimestamp(context, widget.entry.savedAt)})}',
+                        '${item.originName} · ${tr(context, '收藏于 {date}', {'date': favoriteTimestamp(context, _entry.savedAt)})}',
                         style: Theme.of(context).textTheme.bodySmall,
                       ),
                       const SizedBox(height: 18),
@@ -380,7 +412,7 @@ class FavoriteDetailState extends State<FavoriteDetail> {
                             borderRadius: AppCorners.border,
                           ),
                           child: Text(
-                            tr(context, '原消息已删除，收藏仍可独立查看'),
+                            tr(context, '正在核对原消息状态'),
                             style: Theme.of(context).textTheme.bodySmall,
                           ),
                         ),

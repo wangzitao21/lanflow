@@ -21,9 +21,10 @@ class InboxStore {
   final Map<String, List<InboxEntry>> conversationEntries = {};
   final Set<String> favorites = {};
   final List<FavoriteEntry> favoriteEntries = [];
+  final List<MessageConflict> conflicts = [];
   final Map<String, FavoriteEntry> _favoritesById = {};
   final Map<String, String> _favoriteIdsByOriginal = {};
-  bool linkFavoriteDeletion = false;
+  bool linkFavoriteDeletion = true;
   FavoritePreferences _favoritePreferences = FavoritePreferences();
   FavoritePreferences get favoritePreferences => _favoritePreferences;
   set favoritePreferences(FavoritePreferences value) {
@@ -58,6 +59,7 @@ class InboxStore {
   final Map<String, Map<String, dynamic>> profiles = {};
   final Map<String, Conversation> conversations = {};
   final Map<String, ConversationPreference> conversationPreferences = {};
+  final List<String> conversationOrder = [];
   int readBaseline = 0;
   ConversationPreference preference(String id) => conversationPreferences
       .putIfAbsent(id, () => ConversationPreference(readThrough: readBaseline));
@@ -97,7 +99,7 @@ class InboxStore {
   }
 
   void _appearance(Map state) {
-    linkFavoriteDeletion = state['linkFavoriteDeletion'] == true;
+    linkFavoriteDeletion = true;
     language = state['language'] == 'en' ? 'en' : 'zh';
     final value = state['appearance'];
     appearance = const {'light', 'dark', 'system'}.contains(value)
@@ -195,6 +197,14 @@ class InboxStore {
     );
     currentConversation =
         state['currentConversation'] as String? ?? defaultConversationId;
+    conversationOrder
+      ..clear()
+      ..addAll(
+        (state['conversationOrder'] as List? ?? const [])
+            .whereType<String>()
+            .where(inboxIdPattern.hasMatch)
+            .toSet(),
+      );
     drafts
       ..clear()
       ..addAll(
@@ -255,6 +265,15 @@ class InboxStore {
     }
     final incomingRevision = state['revision'] as int? ?? 0;
     if (incomingRevision <= revision || state['unchanged'] == true) return;
+    if (state['conflicts'] is List) {
+      conflicts
+        ..clear()
+        ..addAll(
+          (state['conflicts'] as List).map(
+            (value) => MessageConflict.fromJson(value as Map),
+          ),
+        );
+    }
     if (state['delta'] == true) {
       _applyDelta(state);
       _readHistorySummaries(state['history']);
@@ -273,6 +292,7 @@ class InboxStore {
             record['sequence'] as int,
             InboxItem.fromJson(Map<String, dynamic>.from(data)),
           );
+      entry.item = InboxItem.fromJson(Map<String, dynamic>.from(data));
       entry.copies
         ..clear()
         ..addAll(List<String>.from(record['copies'] as List? ?? []));
@@ -313,9 +333,9 @@ class InboxStore {
       ..clear()
       ..addAll({
         for (final entry in (state['conversations'] as Map? ?? {}).entries)
-          entry.key as String: Conversation(
+          entry.key as String: Conversation.fromJson(
             entry.key as String,
-            entry.value['name'] as String,
+            entry.value as Map,
           ),
       });
     deleted
@@ -351,6 +371,16 @@ class InboxStore {
     for (final record in state['entries'] as List? ?? []) {
       final data = Map<String, dynamic>.from(record['item'] as Map);
       var entry = _byId[data['id']];
+      if (entry != null &&
+          (entry.item.text != data['text'] ||
+              entry.item.name != data['name'] ||
+              entry.item.editHeads.join(',') !=
+                  (data['editHeads'] as List? ?? const []).join(','))) {
+        // Keep shared row/context references, while invalidating text, search
+        // and layout caches when an edit changes an existing message.
+        entry.item = InboxItem.fromJson(data);
+        contentRevision++;
+      }
       if (favorites.contains(data['id'])) {
         _favoriteSources.add(data['id'] as String);
       }
@@ -396,9 +426,9 @@ class InboxStore {
     }
     if ((state['profiles'] as Map?)?.isNotEmpty == true) profilesRevision++;
     for (final entry in (state['conversations'] as Map? ?? {}).entries) {
-      conversations[entry.key as String] = Conversation(
+      conversations[entry.key as String] = Conversation.fromJson(
         entry.key as String,
-        entry.value['name'] as String,
+        entry.value as Map,
       );
     }
     if ((state['conversations'] as Map?)?.isNotEmpty == true) {
@@ -440,7 +470,8 @@ class InboxStore {
           final existing = _favoritesById[next.id];
           if (existing == null ||
               existing.revision != next.revision ||
-              existing.stateEventId != next.stateEventId) {
+              existing.stateEventId != next.stateEventId ||
+              !existing.item.sameContent(next.item)) {
             _favoritesById[next.id] = next;
             _favoriteIdsByOriginal[original] = next.id;
             changed = true;
@@ -562,6 +593,53 @@ class InboxStore {
           as Map,
     ),
   );
+  Future<void> editMessage(
+    String id, {
+    required String text,
+    String name = '',
+    List<String>? parents,
+    String? editorId,
+    String? editorName,
+  }) async => applySnapshot(
+    Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'edit_message',
+            'root': directory.path,
+            'id': id,
+            'text': text,
+            'name': name,
+            'parents': ?parents,
+            'editorId': ?editorId,
+            'editorName': ?editorName,
+            'knownRevision': revision,
+          })
+          as Map,
+    ),
+  );
+  Future<void> resolveMessage(
+    MessageConflict conflict, {
+    String? versionId,
+    String? text,
+    String? name,
+    required String editorId,
+    required String editorName,
+  }) async => applySnapshot(
+    Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'resolve_message',
+            'root': directory.path,
+            'id': conflict.id,
+            'heads': conflict.heads,
+            'versionId': ?versionId,
+            'text': ?text,
+            'name': ?name,
+            'editorId': editorId,
+            'editorName': editorName,
+            'knownRevision': revision,
+          })
+          as Map,
+    ),
+  );
   Future<List<DeletedItem>> recentlyDeleted() async =>
       (await NativeCore.run({'op': 'trash', 'root': directory.path}) as List)
           .map((v) => DeletedItem.fromJson(Map<String, dynamic>.from(v as Map)))
@@ -622,6 +700,21 @@ class InboxStore {
           .map((v) => Map<String, dynamic>.from(v as Map))
           .toList();
 
+  Future<Map<String, dynamic>> transferUpdates(
+    Set<String> endpoints,
+    int after, {
+    int? initialThrough,
+  }) async => Map<String, dynamic>.from(
+    await NativeCore.run({
+          'op': 'transfer_updates',
+          'root': directory.path,
+          'endpoints': endpoints.toList(),
+          'after': after,
+          'initialThrough': ?initialThrough,
+        })
+        as Map,
+  );
+
   Future<Map<String, dynamic>> transferHistory({int offset = 0}) async =>
       Map<String, dynamic>.from(
         await NativeCore.run({
@@ -654,7 +747,13 @@ class InboxStore {
           })
           as bool;
 
-  Future<void> setConversation(String id, String name) async => applySnapshot(
+  Future<void> setConversation(
+    String id,
+    String name, {
+    bool appearance = false,
+    String? avatar,
+    int? avatarColor,
+  }) async => applySnapshot(
     Map<String, dynamic>.from(
       await NativeCore.run({
             'op': 'conversation',
@@ -662,24 +761,68 @@ class InboxStore {
             'root': directory.path,
             'id': id,
             'name': name,
+            if (appearance) 'avatar': avatar,
+            if (appearance) 'avatarColor': avatarColor,
           })
           as Map,
     ),
   );
-  Future<void> setProfile(String id, String name, {String? avatar}) async =>
-      applySnapshot(
-        Map<String, dynamic>.from(
-          await NativeCore.run({
-                'op': 'profile',
-                'knownRevision': revision,
-                'root': directory.path,
-                'id': id,
-                'name': name,
-                'avatar': ?avatar,
-              })
-              as Map,
-        ),
+  Future<void> migrateConversationAvatars() async {
+    var changed = false;
+    for (final entry in conversationPreferences.entries.toList()) {
+      final old = entry.value;
+      if (old.avatar == null && old.avatarColor == null) continue;
+      final current = conversations[entry.key];
+      if (current?.appearanceConfigured != true) {
+        await setConversation(
+          entry.key,
+          current?.name ??
+              (entry.key == defaultConversationId ? '发给自己' : '同步中的会话'),
+          appearance: true,
+          avatar: old.avatar,
+          avatarColor: old.avatarColor,
+        );
+      }
+      old
+        ..avatar = null
+        ..avatarColor = null;
+      changed = true;
+    }
+    if (changed) await save();
+  }
+
+  Future<void> setProfile(
+    String id,
+    String name, {
+    String? avatar,
+    bool appearance = false,
+    String? preset,
+    int? color,
+  }) async => applySnapshot(
+    Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'profile',
+            'knownRevision': revision,
+            'root': directory.path,
+            'id': id,
+            'name': name,
+            'avatar': ?avatar,
+            if (appearance) 'avatarPreset': preset,
+            if (appearance) 'avatarColor': color,
+          })
+          as Map,
+    ),
+  );
+  Future<Map<String, dynamic>> deletions(int after) async =>
+      Map<String, dynamic>.from(
+        await NativeCore.run({
+              'op': 'deletions',
+              'root': directory.path,
+              'after': after,
+            })
+            as Map,
       );
+
   Future<Map<String, dynamic>> changes(
     int after, {
     String? capabilities,
@@ -699,6 +842,23 @@ class InboxStore {
               'knownRevision': revision,
               'root': directory.path,
               'event': event,
+              'source': ?source,
+            })
+            as Map;
+    applySnapshot(Map<String, dynamic>.from(result));
+    return result['changed'] == true;
+  }
+
+  Future<bool> applyChanges(
+    List<Map<String, dynamic>> events, {
+    String? source,
+  }) async {
+    final result =
+        await NativeCore.run({
+              'op': 'apply_batch',
+              'root': directory.path,
+              'knownRevision': revision,
+              'events': events,
               'source': ?source,
             })
             as Map;
@@ -854,6 +1014,7 @@ class InboxStore {
               MapEntry(id, images.map((item) => item.toJson()).toList()),
         ),
         'currentConversation': currentConversation,
+        'conversationOrder': List<String>.of(conversationOrder),
         'appearance': appearance,
         'language': language,
         'linkFavoriteDeletion': linkFavoriteDeletion,
@@ -920,6 +1081,7 @@ class InboxStore {
     _blobPaths.clear();
     favorites.clear();
     favoriteEntries.clear();
+    conflicts.clear();
     _favoritesById.clear();
     _favoriteIdsByOriginal.clear();
     deleted.clear();

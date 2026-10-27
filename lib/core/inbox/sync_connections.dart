@@ -9,6 +9,10 @@ extension _SyncConnections on InboxController {
     _progress.setForeground(value);
     lan.setForeground(value);
     if (resumed) {
+      for (final status in statuses.values) {
+        status.retryAfter = null;
+        status.failures = 0;
+      }
       // A quiet NAS socket can have been lost while the device was asleep.
       // Re-establish it on this user event instead of adding idle heartbeats.
       for (final watch in _watches.values) {
@@ -16,11 +20,13 @@ extension _SyncConnections on InboxController {
       }
       _watches.clear();
       _updateWatches();
+      if (automaticSync) requestSync(immediate: true);
     }
   }
 
   void _setNetworkAvailable(bool value) {
     if (_networkAvailable == value) return;
+    _networkGeneration++;
     _networkAvailable = value;
     lan.setNetworkAvailable(value);
     if (!value) {
@@ -55,6 +61,7 @@ extension _SyncConnections on InboxController {
       return;
     }
     final routeChanged = _networkState.fingerprint != state.fingerprint;
+    _networkGeneration++;
     _networkState = state;
     // Apply a rich snapshot once. The legacy boolean handler also reconnects
     // watches/cancels work, so calling it here would repeat both side effects.
@@ -103,7 +110,7 @@ extension _SyncConnections on InboxController {
   String _connectionSignature(SyncEndpoint endpoint) {
     final peer = endpoint.isHub ? null : lan.peers[endpoint.id];
     return '${endpoint.url}:${endpoint.token}:${endpoint.fingerprint}:'
-        '${peer?.instanceId}';
+        '${peer?.instanceId}:$_networkGeneration';
   }
 
   bool _connectionIsCurrent(SyncEndpoint endpoint, String signature) {
@@ -142,6 +149,10 @@ extension _SyncConnections on InboxController {
         isForeground: () => _foreground,
         onChange: () {
           if (!current()) return;
+          _expectRemoteChanges(endpoint.key);
+          unawaited(
+            _sync.interruptTransfers(endpoint.key).catchError((Object _) {}),
+          );
           statuses[endpoint.key]?.retryAfter = null;
           requestSync(endpoint: endpoint.key);
         },
@@ -157,7 +168,12 @@ extension _SyncConnections on InboxController {
           }
           if (error is StateError) {
             status.needsAttention = true;
-            status.error = error.message;
+            status.errorCategory = 'authentication';
+            status.error = syncErrorMessage(
+              error.message,
+              status.errorCategory,
+              isHub: true,
+            );
           }
           if (changed || error is StateError) _activityChanged();
         },
@@ -179,6 +195,7 @@ extension _SyncConnections on InboxController {
   void _lanChanged() {
     if (_closed) return;
     if (_wasPaused != lan.receivingPaused) {
+      _networkGeneration++;
       _wasPaused = lan.receivingPaused;
       if (_wasPaused) {
         _kick?.cancel();
@@ -213,14 +230,21 @@ extension _SyncConnections on InboxController {
     _connections.removeWhere((key, _) => !targets.any((e) => e.key == key));
     final boundKeys = syncTargets.map((target) => target.key).toSet();
     if (!setEquals(_knownSyncTargets, boundKeys)) {
+      final added = boundKeys.difference(_knownSyncTargets);
       _knownSyncTargets
         ..clear()
         ..addAll(boundKeys);
       // Binding changes still update the local transfer list without causing
       // an unrelated network synchronization.
       unawaited(refreshTransfers().catchError((Object _) {}));
+      if (automaticSync) {
+        for (final key in added) {
+          requestSync(endpoint: key, immediate: true);
+        }
+      }
     }
     statuses.removeWhere((key, _) => !boundKeys.contains(key));
+    _pendingPulls.removeWhere((key, _) => !boundKeys.contains(key));
     _updateWatches();
     for (final endpoint in targets.where((e) => !e.isHub)) {
       final peer = lan.peers[endpoint.id]!;
@@ -232,6 +256,11 @@ extension _SyncConnections on InboxController {
       // An offline flag or an unrelated device update must not resync every
       // device. A new address/process/content cursor catches up just this peer.
       if (previous != signature && peer.online && automaticSync) {
+        _expectRemoteChanges(endpoint.key);
+        unawaited(
+          _sync.interruptTransfers(endpoint.key).catchError((Object _) {}),
+        );
+        statuses[endpoint.key]?.retryAfter = null;
         requestSync(endpoint: endpoint.key);
       }
     }

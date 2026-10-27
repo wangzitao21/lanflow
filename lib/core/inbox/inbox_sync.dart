@@ -20,6 +20,18 @@ class InboxSync {
   bool _closed = false;
   final Map<String, int> _generations = {};
   final Map<String, Future<void>> _cancellations = {};
+  final Map<String, String> _activeRuns = {};
+
+  Future<void> interruptTransfers(String key) async {
+    final run = _activeRuns[key];
+    if (run == null) return;
+    await _invoke({
+      'op': 'interrupt_sync_transfer',
+      'root': store.directory.path,
+      'key': key,
+      'runId': run,
+    });
+  }
 
   Future<bool> hasPendingChanges(SyncEndpoint endpoint) async =>
       await _invoke({
@@ -78,7 +90,7 @@ class InboxSync {
   Future<
     ({bool more, String? error, String? errorCategory, DateTime? retryAfter})
   >
-  sync(SyncEndpoint endpoint) async {
+  sync(SyncEndpoint endpoint, {bool continuousFiles = false}) async {
     final generation = _generations[endpoint.key] ?? 0;
     void check() {
       if (_closed || generation != (_generations[endpoint.key] ?? 0)) {
@@ -98,17 +110,23 @@ class InboxSync {
       'key': endpoint.key,
     });
     check();
+    _activeRuns[endpoint.key] = runId as String;
     final state =
         await _invoke({
               'op': 'sync',
               'root': store.directory.path,
               'knownRevision': store.revision,
               'runId': runId,
+              'continuousFiles': continuousFiles,
               'endpoint': {
                 ...endpoint.toJson(),
                 'key': endpoint.key,
                 if (endpoint.deviceId != null) 'deviceId': endpoint.deviceId,
               },
+            }).whenComplete(() {
+              if (_activeRuns[endpoint.key] == runId) {
+                _activeRuns.remove(endpoint.key);
+              }
             })
             as Map;
     check();

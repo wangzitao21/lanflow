@@ -7,6 +7,8 @@ import 'package:lanflow/ui/shared/chat_theme.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/inbox_labels.dart';
+import 'message_conflict_tile.dart';
+import 'package:lanflow/ui/devices/sync_connection_editor.dart';
 
 class SyncAttentionNotice extends StatelessWidget {
   const SyncAttentionNotice({
@@ -39,7 +41,7 @@ class SyncAttentionNotice extends StatelessWidget {
               const SizedBox(width: 10),
               Expanded(
                 child: Text(
-                  tr(context, '{count} 台设备同步需要处理', {'count': problems.length}),
+                  tr(context, '{count} 条消息存在版本冲突', {'count': problems.length}),
                   style: TextStyle(
                     fontSize: AppTypography.compact,
                     color: palette.warning,
@@ -53,7 +55,7 @@ class SyncAttentionNotice extends StatelessWidget {
                   foregroundColor: palette.warning,
                   minimumSize: const Size(72, 48),
                 ),
-                child: Text(tr(context, '查看问题')),
+                child: Text(tr(context, '处理冲突')),
               ),
             ],
           ),
@@ -79,26 +81,24 @@ class SyncIssuesPanel extends StatelessWidget {
     builder: (context, _) {
       final problems = inbox.syncProblems;
       return AppPanel(
-        title: '同步异常',
-        width: 480,
-        height: 380,
+        title: '同步问题',
+        width: 600,
+        height: 600,
         actions: [
           TextButton(onPressed: onDevices, child: Text(tr(context, '我的设备'))),
           TextButton(onPressed: onTransfers, child: Text(tr(context, '传输任务'))),
         ],
         child: problems.isEmpty
-            ? Center(child: Text(tr(context, '暂无需要处理的同步异常')))
+            ? Center(child: Text(tr(context, '暂无消息版本冲突')))
             : ListView(
                 children: [
-                  Text(tr(context, '本机内容仍然保留。处理后会继续同步。')),
+                  Text(tr(context, '所有冲突版本均已保留，处理结果会同步到其他设备。')),
                   const SizedBox(height: 16),
-                  for (final target in problems)
-                    SyncIssueTile(
-                      key: ValueKey(target.key),
+                  for (final conflict in problems)
+                    MessageConflictTile(
+                      key: ValueKey(conflict.id),
                       inbox: inbox,
-                      target: target,
-                      detail: inbox.syncProblemDetail(target.key),
-                      onDevices: onDevices,
+                      conflict: conflict,
                     ),
                 ],
               ),
@@ -151,11 +151,24 @@ class _SyncIssueTileState extends State<SyncIssueTile> {
   Widget build(BuildContext context) {
     final scheme = Theme.of(context).colorScheme;
     final problem = userError(widget.detail, fallback: '同步未完成，可在此重试');
-    final requiresPairing =
-        widget.onDevices != null &&
-        (problem.contains('重新绑定') ||
-            problem.contains('连接码') ||
-            problem.contains('另一台设备上确认'));
+    final task = widget.inbox.transferTasks
+        .where(
+          (task) => task.endpoint == widget.target.key && task.needsAttention,
+        )
+        .firstOrNull;
+    final identityChanged =
+        const {'identity', 'authentication'}.contains(
+          widget.inbox.statuses[widget.target.key]?.errorCategory ??
+              task?.errorCategory,
+        ) ||
+        const {
+          '设备证书不一致',
+          'NAS 身份与连接码不匹配',
+          'NAS 连接码已失效，请重新绑定',
+          '连接身份校验失败，请检查 NAS 连接码',
+          '连接已失效，请重新配对',
+          '设备身份校验失败，请确认设备地址或重新绑定',
+        }.contains(widget.detail);
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
       child: Row(
@@ -185,6 +198,12 @@ class _SyncIssueTileState extends State<SyncIssueTile> {
                     tr(context, problem),
                     style: Theme.of(context).textTheme.bodySmall,
                   ),
+                if (task != null)
+                  Text(
+                    task.item.name,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
                 if (_error != null)
                   Semantics(
                     liveRegion: true,
@@ -199,30 +218,41 @@ class _SyncIssueTileState extends State<SyncIssueTile> {
                       _busy ||
                           widget.inbox.statuses[widget.target.key]?.busy == true
                       ? null
-                      : requiresPairing
-                      ? widget.onDevices
                       : _retry,
                   style: TextButton.styleFrom(minimumSize: const Size(96, 48)),
-                  icon: Icon(
-                    requiresPairing
-                        ? Icons.link_rounded
-                        : Icons.refresh_rounded,
-                    size: 18,
-                  ),
-                  label: Text(
-                    tr(
-                      context,
-                      requiresPairing
-                          ? '重新绑定'
-                          : _busy
-                          ? '重试中…'
-                          : '重试同步',
-                    ),
-                  ),
+                  icon: const Icon(Icons.refresh_rounded, size: 18),
+                  label: Text(tr(context, _busy ? '重试中…' : '重试同步')),
+                ),
+                TextButton(
+                  key: ValueKey('configure-sync-${widget.target.key}'),
+                  onPressed: _busy
+                      ? null
+                      : () => showSyncConnectionEditor(
+                          context,
+                          widget.inbox,
+                          widget.target,
+                        ),
+                  child: Text(tr(context, '重新设置')),
+                ),
+                TextButton(
+                  key: ValueKey('remove-sync-${widget.target.key}'),
+                  onPressed: _busy
+                      ? null
+                      : () => removeSyncConnection(
+                          context,
+                          widget.inbox,
+                          widget.target,
+                        ),
+                  child: Text(tr(context, '移除连接')),
                 ),
               ],
             ),
           ),
+          if (identityChanged && widget.onDevices != null)
+            TextButton(
+              onPressed: _busy ? null : widget.onDevices,
+              child: Text(tr(context, '重新绑定')),
+            ),
         ],
       ),
     );

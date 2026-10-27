@@ -17,8 +17,50 @@ import android.os.Looper
 class ReceiverService : Service() {
     companion object {
         private var current: ReceiverService? = null
+        private var enabled = false
         private var requestedActive = false
+        private var application: Context? = null
         private val discoveryLock = DiscoveryMulticastLock()
+        private val startup = Handler(Looper.getMainLooper())
+        private val startTransfer = Runnable {
+            val context = application
+            if (context != null && shouldRun(context) && current == null) {
+                try {
+                    val intent = Intent(context, ReceiverService::class.java)
+                    if (Build.VERSION.SDK_INT >= 26) context.startForegroundService(intent)
+                    else context.startService(intent)
+                } catch (_: IllegalStateException) {
+                    // Android may prohibit starting a service from a background
+                    // process. The live connection continues; reopening retries.
+                } catch (_: SecurityException) {
+                    // Never block local storage or network recovery on a notification.
+                }
+            }
+        }
+
+        private fun shouldRun(context: Context): Boolean {
+            val paused = context.getSharedPreferences("lanflow_receiver", Context.MODE_PRIVATE)
+                .getBoolean("paused", false)
+            return receiverNeedsForeground(enabled, requestedActive, paused)
+        }
+
+        private fun schedule(context: Context) {
+            application = context.applicationContext
+            startup.removeCallbacks(startTransfer)
+            if (!shouldRun(context)) {
+                current?.finishTransfer()
+                context.stopService(Intent(context, ReceiverService::class.java))
+                context.getSystemService(NotificationManager::class.java).cancel(1001)
+            } else if (current == null) {
+                // Short metadata exchanges never create a notification.
+                startup.postDelayed(startTransfer, 1000L)
+            }
+        }
+
+        fun enable(context: Context) {
+            enabled = true
+            schedule(context)
+        }
 
         fun updateState(context: Context, language: String? = null, paused: Boolean? = null, active: Boolean? = null) {
             active?.let { requestedActive = it }
@@ -30,27 +72,27 @@ class ReceiverService : Service() {
                 }.apply()
             }
             current?.let { service ->
-                val changed = (language != null && service.english != (language == "en")) ||
-                    (paused != null && service.paused != paused) ||
-                    (active != null && service.transferring != active)
                 language?.let { service.english = it == "en" }
                 paused?.let { service.paused = it }
                 active?.let { service.transferring = it }
-                if (changed) service.refreshState()
+                service.refreshState()
             }
+            schedule(context)
         }
 
         fun requestDiscoveryWindow(context: Context, durationMillis: Long) {
-            val paused = current?.paused ?: context.getSharedPreferences("lanflow_receiver", Context.MODE_PRIVATE)
-                .getBoolean("paused", false)
-            if (paused) return
+            if (context.getSharedPreferences("lanflow_receiver", Context.MODE_PRIVATE).getBoolean("paused", false)) return
             discoveryLock.request(context, durationMillis)
         }
 
         fun stop(context: Context) {
+            enabled = false
             requestedActive = false
+            startup.removeCallbacks(startTransfer)
             discoveryLock.clear()
+            current?.finishTransfer()
             context.stopService(Intent(context, ReceiverService::class.java))
+            context.getSystemService(NotificationManager::class.java).cancel(1001)
         }
     }
 
@@ -61,9 +103,7 @@ class ReceiverService : Service() {
     private val handler = Handler(Looper.getMainLooper())
     private val renewWakeLock = object : Runnable {
         override fun run() {
-            if (transferring && !paused) {
-                // Keep each acquisition bounded, but renew while real work
-                // remains. Long transfers must not lose their lock at 2 hours.
+            if (receiverNeedsForeground(enabled, transferring, paused)) {
                 wakeLock?.acquire(5 * 60 * 1000L)
                 handler.postDelayed(this, 60 * 1000L)
             }
@@ -78,6 +118,8 @@ class ReceiverService : Service() {
         transferring = requestedActive
         current = this
         updateChannel()
+        // Satisfy Android's foreground-service contract even if a transfer
+        // completes between startForegroundService and service creation.
         if (Build.VERSION.SDK_INT >= 29) {
             startForeground(1001, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_CONNECTED_DEVICE)
         } else startForeground(1001, notification())
@@ -87,29 +129,35 @@ class ReceiverService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.hasExtra("transferring") == true) {
-            transferring = intent.getBooleanExtra("transferring", false)
-        }
+        transferring = requestedActive
         refreshState()
         return START_NOT_STICKY
     }
 
     private fun updateChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            getSystemService(NotificationManager::class.java).createNotificationChannel(
-                NotificationChannel("lanflow_receive", if (english) "Message sync" else "消息同步", NotificationManager.IMPORTANCE_LOW))
+            val channel = NotificationChannel("lanflow_receive", if (english) "Message sync" else "消息同步", NotificationManager.IMPORTANCE_LOW)
+            channel.setSound(null, null)
+            channel.enableVibration(false)
+            getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         }
     }
 
-    private fun refreshState() {
-        val active = transferring && !paused
-        if (paused) discoveryLock.clear()
+    private fun finishTransfer() {
         handler.removeCallbacks(renewWakeLock)
-        if (active) {
-            wakeLock?.acquire(5 * 60 * 1000L)
-            handler.postDelayed(renewWakeLock, 60 * 1000L)
+        if (wakeLock?.isHeld == true) wakeLock?.release()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+    }
+
+    private fun refreshState() {
+        handler.removeCallbacks(renewWakeLock)
+        if (!receiverNeedsForeground(enabled, transferring, paused)) {
+            finishTransfer()
+            return
         }
-        if (!active && wakeLock?.isHeld == true) wakeLock?.release()
+        wakeLock?.acquire(5 * 60 * 1000L)
+        handler.postDelayed(renewWakeLock, 60 * 1000L)
         updateChannel()
         getSystemService(NotificationManager::class.java).notify(1001, notification())
     }
@@ -121,19 +169,18 @@ class ReceiverService : Service() {
             else @Suppress("DEPRECATION") Notification.Builder(this)
         return builder.setSmallIcon(R.drawable.ic_transfer)
             .setContentTitle("LanFlow")
-            .setContentText(when {
-                paused -> if (english) "Sync paused · Tap to open" else "同步已暂停，轻点打开"
-                transferring -> if (english) "Syncing messages and files" else "正在同步消息和文件"
-                else -> if (english) "Background sync ready · Tap to open" else "后台同步服务已就绪，轻点打开"
-            })
-            .setContentIntent(launch).setOngoing(true).setShowWhen(false).build()
+            .setContentText(if (english) "Transferring messages and files" else "正在传输消息和文件")
+            .setContentIntent(launch).setOngoing(true).setOnlyAlertOnce(true).setShowWhen(false).build()
     }
 
-    override fun onTaskRemoved(rootIntent: Intent?) { stopSelf() }
+    override fun onTaskRemoved(rootIntent: Intent?) { stop(this) }
     override fun onDestroy() {
         handler.removeCallbacks(renewWakeLock)
-        if (current === this) { current = null; requestedActive = false; discoveryLock.clear() }
         if (wakeLock?.isHeld == true) wakeLock?.release()
+        if (current === this) {
+            current = null
+            if (enabled && requestedActive && !paused) schedule(this)
+        }
         super.onDestroy()
     }
     override fun onBind(intent: Intent?): IBinder? = null

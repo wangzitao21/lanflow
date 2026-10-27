@@ -9,7 +9,8 @@ pub(super) fn validate_item(v: &Value) -> Result<()> {
     if let Some(quote) = v.get("quote") {
         id(quote, "id")?;
         if string(quote, "name")?.encode_utf16().count() > 60
-            || string(quote, "text")?.encode_utf16().count() > 2000 {
+            || string(quote, "text")?.encode_utf16().count() > 2000
+        {
             return Err("Invalid quote length".into());
         }
     }
@@ -58,7 +59,10 @@ pub(super) fn normalize_item(value: &Value) -> Result<Value> {
         item.insert("conversationId".into(), conversation.clone());
     }
     if let Some(quote) = value.get("quote") {
-        item.insert("quote".into(), json!({"id": quote["id"], "name": quote["name"], "text": quote["text"]}));
+        item.insert(
+            "quote".into(),
+            json!({"id": quote["id"], "name": quote["name"], "text": quote["text"]}),
+        );
     }
     Ok(Value::Object(item))
 }
@@ -83,7 +87,37 @@ pub(super) fn apply(
     Ok(changed)
 }
 
-fn apply_transaction(
+pub(super) fn batch_events(value: &Value) -> Result<&Vec<Value>> {
+    let events = value
+        .as_array()
+        .filter(|v| !v.is_empty() && v.len() <= 50)
+        .ok_or_else(|| errors::api(400, "Invalid change batch"))?;
+    if serde_json::to_vec(value)?.len() > 1024 * 1024 - 32 {
+        return Err(errors::api(413, "Change batch too large"));
+    }
+    for event in events {
+        id(event, "id")?;
+    }
+    Ok(events)
+}
+
+pub(super) fn apply_batch(
+    root: &Path,
+    db: &mut Connection,
+    value: &Value,
+    source: Option<&str>,
+) -> Result<bool> {
+    let events = batch_events(value)?;
+    let tx = db.transaction()?;
+    let mut changed = false;
+    for event in events {
+        changed |= apply_transaction(root, &tx, event, source)?;
+    }
+    tx.commit()?;
+    Ok(changed)
+}
+
+pub(super) fn apply_transaction(
     root: &Path,
     tx: &Connection,
     event: &Value,
@@ -93,7 +127,7 @@ fn apply_transaction(
     let kind = string(event, "type")?;
     if !matches!(
         kind,
-        "item" | "delete" | "profile" | "conversation" | "favorite" | "favorite_snapshot"
+        "item" | "delete" | "profile" | "conversation" | "favorite" | "favorite_snapshot" | "edit"
     ) {
         return Err("Unknown change type".into());
     }
@@ -116,11 +150,16 @@ fn apply_transaction(
                 "INSERT OR IGNORE INTO seen VALUES(?,?)",
                 params![event_id, source],
             )?;
-            if kind == "item" {
-                changed = tx.execute(
-                    "INSERT OR IGNORE INTO copies VALUES(?,?)",
-                    params![string(&event["item"], "id")?, source],
-                )? > 0;
+            if kind == "item" || kind == "edit" {
+                changed = message_edits::mark_copy(
+                    tx,
+                    if kind == "item" {
+                        string(&event["item"], "id")?
+                    } else {
+                        string(event, "target")?
+                    },
+                    source,
+                )?;
             }
         }
         return Ok(changed);
@@ -130,7 +169,7 @@ fn apply_transaction(
             let normalized = normalize_item(&event["item"])?;
             let item = &normalized;
             let item_id = string(item, "id")?;
-            let encoded = serde_json::to_string(item)?;
+            let encoded = serde_json::to_string(&message_edits::edited_item(tx, item)?)?;
             let old: Option<String> = tx
                 .query_row("SELECT body FROM items WHERE id=?", [item_id], |r| r.get(0))
                 .optional()?;
@@ -155,21 +194,32 @@ fn apply_transaction(
             if !deleted(&tx, item_id)? {
                 storage::insert_item(&tx, item_id, sequence, &encoded)?;
             }
-            if let Some(source) = source {
-                tx.execute(
-                    "INSERT OR IGNORE INTO copies VALUES(?,?)",
-                    params![item_id, source],
-                )?;
-            }
             favorites::hydrate_source(tx, item_id)?;
+        }
+        "edit" => {
+            message_edits::apply_edit(tx, event)?;
+            tx.execute(
+                "INSERT INTO events(id,body) VALUES(?,?)",
+                params![event_id, body],
+            )?;
         }
         "delete" => {
             let target = id(event, "target")?;
+            let was_favorite: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM favorites WHERE id=? AND json_extract(body,'$.value')=1)",[&target],|r| r.get(0))?;
             favorites::hydrate_source(tx, &target)?;
             tx.execute(
                 "INSERT OR IGNORE INTO trash SELECT id,body,? FROM items WHERE id=?",
                 params![Utc::now().to_rfc3339(), target],
             )?;
+            if !deleted(tx, &target)? {
+                favorites::archive_source(tx, &target)?;
+            }
+            if was_favorite {
+                tx.execute(
+                    "UPDATE trash SET body=json_set(body,'$._wasFavorite',json('true')) WHERE id=?",
+                    [&target],
+                )?;
+            }
             tx.execute(
                 "DELETE FROM transfer_jobs WHERE json_extract(body,'$.item.id')=?",
                 [&target],
@@ -177,6 +227,7 @@ fn apply_transaction(
             tx.execute("INSERT OR IGNORE INTO deleted VALUES(?)", [&target])?;
             tx.execute("DELETE FROM items WHERE id=?", [&target])?;
             tx.execute("DELETE FROM copies WHERE item_id=?", [&target])?;
+            favorites::source_changed(tx, &target)?;
             tx.execute(
                 "INSERT INTO events(id,body) VALUES(?,?)",
                 params![event_id, body],
@@ -192,6 +243,24 @@ fn apply_transaction(
                 .ok_or("Invalid conversation revision")?;
             if name.trim().is_empty() || name.encode_utf16().count() > 40 {
                 return Err("Invalid conversation name".into());
+            }
+            if let Some(avatar) = conversation.get("avatar").filter(|value| !value.is_null()) {
+                if !avatar.as_str().is_some_and(|value| {
+                    value.len() <= 40
+                        && value
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"_-".contains(&c))
+                }) {
+                    return Err("Invalid conversation avatar".into());
+                }
+            }
+            if let Some(color) = conversation
+                .get("avatarColor")
+                .filter(|value| !value.is_null())
+            {
+                if !color.as_u64().is_some_and(|color| color <= u32::MAX as u64) {
+                    return Err("Invalid conversation avatar color".into());
+                }
             }
             tx.execute("INSERT INTO conversations VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,body=excluded.body WHERE excluded.revision>conversations.revision OR (excluded.revision=conversations.revision AND excluded.event_id>conversations.event_id)",
                 params![owner,revision,event_id,serde_json::to_string(conversation)?])?;
@@ -212,6 +281,19 @@ fn apply_transaction(
             let owner = id(profile, "id")?;
             let name = string(profile, "name")?;
             let avatar = string(profile, "avatar")?;
+            if let Some(preset) = profile.get("avatarPreset").filter(|value| !value.is_null()) {
+                if !matches!(
+                    preset.as_str(),
+                    Some("linux" | "windows" | "android" | "ios" | "macos")
+                ) {
+                    return Err("Invalid device avatar preset".into());
+                }
+            }
+            if let Some(color) = profile.get("avatarColor").filter(|value| !value.is_null()) {
+                if !color.as_u64().is_some_and(|value| value <= u32::MAX as u64) {
+                    return Err("Invalid device avatar color".into());
+                }
+            }
             if name.trim().is_empty()
                 || name.encode_utf16().count() > 60
                 || avatar.len() > 400000
@@ -238,6 +320,17 @@ fn apply_transaction(
             "INSERT OR IGNORE INTO seen VALUES(?,?)",
             params![event_id, source],
         )?;
+        if kind == "item" || kind == "edit" {
+            message_edits::mark_copy(
+                tx,
+                if kind == "item" {
+                    string(&event["item"], "id")?
+                } else {
+                    string(event, "target")?
+                },
+                source,
+            )?;
+        }
     }
     Ok(true)
 }
@@ -258,11 +351,22 @@ pub(super) fn delete_many(root: &Path, db: &mut Connection, ids: &Value) -> Resu
     let tx = db.transaction()?;
     let link = favorites::linked(&tx)?;
     for target in targets {
+        let was_favorite: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM favorites WHERE id=? AND json_extract(body,'$.value')=1)",
+            [&target],
+            |r| r.get(0),
+        )?;
         favorites::hydrate_source(&tx, &target)?;
         if link {
             favorites::remove_original(&tx, &target)?;
         }
         delete_transaction(root, &tx, &target)?;
+        if was_favorite {
+            tx.execute(
+                "UPDATE trash SET body=json_set(body,'$._wasFavorite',json('true')) WHERE id=?",
+                [&target],
+            )?;
+        }
     }
     tx.commit()?;
     Ok(())

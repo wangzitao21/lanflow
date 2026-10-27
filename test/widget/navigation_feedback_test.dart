@@ -5,7 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 import 'package:lanflow/core/inbox/inbox_models.dart';
 import 'package:lanflow/core/network/models.dart';
-import 'package:lanflow/ui/chat/sync_feedback.dart';
+import 'package:lanflow/ui/chat/sync_details.dart';
 import 'package:lanflow/ui/settings/transfer_dialog.dart';
 
 import '../support/widget_harness.dart';
@@ -90,14 +90,11 @@ void main() {
         }),
       ];
       expect(harness.inbox.copyStatus(text), '已同步 0/1 · 等待同步');
-      expect(harness.inbox.copyStatus(file), '已同步 0/1 · 同步失败，需处理');
+      expect(harness.inbox.copyStatus(file), '已同步 0/1 · 连接或传输待处理');
       text.copies.add(endpoint);
       expect(harness.inbox.copyStatus(text), '已同步 1/1');
       await harness.mount(tester);
-      expect(
-        find.byKey(const ValueKey('sync-attention-notice')),
-        findsOneWidget,
-      );
+      expect(find.byKey(const ValueKey('sync-attention-notice')), findsNothing);
       harness.lan.sessions.remove(id);
       harness.inbox.activity.value++;
       await tester.pump();
@@ -107,30 +104,43 @@ void main() {
     },
   );
 
-  testWidgets('phone home and settings preserve chat drafts across navigation', (tester) async {
-    await harness.mount(tester, size: const Size(320, 640), platform: TargetPlatform.android, openMobileChat: false);
-    expect(find.byType(NavigationDestination), findsNWidgets(3));
-    await harness.openSettingsPage(tester, 'devices');
-    expect(find.textContaining('暂无附近设备'), findsOneWidget);
-    expect(find.byType(Dialog), findsOneWidget);
-    await harness.closeSettings(tester);
-    await tester.tap(find.byKey(const ValueKey('conversation-$defaultConversationId')));
-    await tester.pumpAndSettle();
-    final editor = find.byKey(const ValueKey('inbox-composer'));
-    await tester.tap(editor);
-    await tester.pump();
-    await tester.enterText(editor, '导航切换时保留的草稿');
-    final file = File('${harness.directory.path}/draft.txt');
-    await tester.runAsync(() async { await file.writeAsString('attachment'); await harness.inbox.stageFile(file.path); });
-    await tester.pumpAndSettle();
-    await harness.openSettingsPage(tester, 'transfers');
-    expect(find.byType(TransferDialog), findsOneWidget);
-    await harness.closeSettings(tester);
-    expect(tester.widget<TextField>(editor).controller!.text, '导航切换时保留的草稿');
-    expect(harness.inbox.store.draftAttachments.single.name, 'draft.txt');
-    expect(tester.takeException(), isNull);
-    await tester.pumpWidget(const SizedBox.shrink());
-  });
+  testWidgets(
+    'phone home and settings preserve chat drafts across navigation',
+    (tester) async {
+      await harness.mount(
+        tester,
+        size: const Size(320, 640),
+        platform: TargetPlatform.android,
+        openMobileChat: false,
+      );
+      expect(find.byType(NavigationDestination), findsNWidgets(3));
+      await harness.openSettingsPage(tester, 'devices');
+      expect(find.textContaining('暂无附近设备'), findsOneWidget);
+      expect(find.byType(Dialog), findsOneWidget);
+      await harness.closeSettings(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('conversation-$defaultConversationId')),
+      );
+      await tester.pumpAndSettle();
+      final editor = find.byKey(const ValueKey('inbox-composer'));
+      await tester.tap(editor);
+      await tester.pump();
+      await tester.enterText(editor, '导航切换时保留的草稿');
+      final file = File('${harness.directory.path}/draft.txt');
+      await tester.runAsync(() async {
+        await file.writeAsString('attachment');
+        await harness.inbox.stageFile(file.path);
+      });
+      await tester.pumpAndSettle();
+      await harness.openSettingsPage(tester, 'transfers');
+      expect(find.byType(TransferDialog), findsOneWidget);
+      await harness.closeSettings(tester);
+      expect(tester.widget<TextField>(editor).controller!.text, '导航切换时保留的草稿');
+      expect(harness.inbox.store.draftAttachments.single.name, 'draft.txt');
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
 
   testWidgets(
     'phone menus share touch targets and Back only closes the current layer',
@@ -207,13 +217,12 @@ void main() {
   );
 
   testWidgets(
-    'selection remains distinct from a pinned custom conversation color',
+    'selection stays unambiguous for pinned conversations in every theme',
     (tester) async {
       late Conversation work;
       await tester.runAsync(() async {
         work = await harness.inbox.createConversation('工作');
         await harness.inbox.setConversationPinned(work.id, true);
-        await harness.inbox.setConversationBackground(work.id, 0xFFE6E0F0);
         harness.inbox.selectConversation(defaultConversationId);
       });
       for (final appearance in ['light', 'dark']) {
@@ -238,7 +247,6 @@ void main() {
           ),
           findsNothing,
         );
-        expect(harness.inbox.store.preference(work.id).background, 0xFFE6E0F0);
         expect(harness.inbox.store.preference(work.id).pinnedAt, isNotNull);
         expect(tester.takeException(), isNull);
         await tester.pumpWidget(const SizedBox.shrink());
@@ -248,7 +256,7 @@ void main() {
   );
 
   testWidgets(
-    'online failures stay visible without changing connection labels or leaking errors',
+    'connection failures stay actionable without becoming message conflicts',
     (tester) async {
       late InboxEntry entry;
       await tester.runAsync(() async {
@@ -265,12 +273,12 @@ void main() {
         ..needsAttention = true
         ..error = 'FileSystemException: /private/device/store.sqlite';
       await harness.mount(tester);
-      expect(find.text('1/1 台在线'), findsOneWidget);
-      expect(find.text('已同步 0/1 · 同步失败，需处理'), findsOneWidget);
+      expect(find.text('已绑定 1 台设备'), findsNWidgets(2));
       expect(
-        find.byKey(const ValueKey('sync-attention-notice')),
+        find.byKey(ValueKey('sync-badge-${entry.item.id}')),
         findsOneWidget,
       );
+      expect(find.byKey(const ValueKey('sync-attention-notice')), findsNothing);
       final editor = tester.widget<TextField>(
         find.byKey(const ValueKey('inbox-composer')),
       );
@@ -280,7 +288,7 @@ void main() {
         await tester.pump();
         expect(
           find.byKey(const ValueKey('sync-attention-notice')),
-          findsOneWidget,
+          findsNothing,
         );
         expect(
           tester.widget<TextField>(
@@ -289,9 +297,11 @@ void main() {
           same(editor),
         );
       }
-      await tester.tap(find.byKey(const ValueKey('open-sync-problems')));
+      await tester.tap(find.byKey(ValueKey('copy-status-${entry.item.id}')));
       await tester.pumpAndSettle();
-      expect(find.byType(SyncIssuesPanel), findsOneWidget);
+      expect(find.byType(SyncDetails), findsOneWidget);
+      expect(find.byKey(ValueKey('configure-sync-$endpoint')), findsOneWidget);
+      expect(find.byKey(ValueKey('remove-sync-$endpoint')), findsOneWidget);
       expect(find.textContaining('/private/device'), findsNothing);
       // A binding without a reachable address must not claim that retry succeeded.
       await tester.tap(find.byKey(ValueKey('retry-sync-$endpoint')));
@@ -304,11 +314,14 @@ void main() {
       entry.copies.add(endpoint);
       harness.inbox.activity.value++;
       await tester.pumpAndSettle();
-      expect(find.text('暂无需要处理的同步异常'), findsOneWidget);
+      expect(find.text('已同步'), findsOneWidget);
       await tester.tap(find.byTooltip('关闭'));
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('sync-attention-notice')), findsNothing);
-      expect(find.text('已同步 1/1'), findsOneWidget);
+      expect(
+        find.byKey(ValueKey('sync-badge-${entry.item.id}')),
+        findsOneWidget,
+      );
       status.online = false;
       status.error = '设备离线';
       harness.inbox.activity.value++;

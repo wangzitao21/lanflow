@@ -247,6 +247,18 @@ void main() {
           final bubble = find.byKey(ValueKey('media-bubble-${entry.item.id}'));
           final widget = tester.widget<MessageBubble>(bubble);
           final size = tester.getSize(bubble);
+          final bounds = tester.getRect(bubble);
+          final badge = tester.getRect(
+            find.byKey(ValueKey('sync-badge-${entry.item.id}')),
+          );
+          expect(
+            badge.center.dx,
+            closeTo(
+              bounds.right - (local ? ChatMetrics.bubbleTailWidth : 0),
+              .1,
+            ),
+          );
+          expect(badge.center.dy, closeTo(bounds.bottom, .1));
           expect(widget.outgoing, local);
           final shape = MessageBubbleBorder(
             outgoing: local,
@@ -343,11 +355,26 @@ void main() {
       await tester.pumpAndSettle();
       expect(find.byType(ProfileAvatar), findsNWidgets(4));
       expect(find.text('另一台设备'), findsNWidgets(2));
-      for (final entry in entries.take(2)) {
+      for (final entry in entries) {
         expect(
           find.byKey(ValueKey('copy-status-${entry.item.id}')),
           findsOneWidget,
         );
+        final content = tester.getRect(
+          find.byKey(ValueKey('message-badge-content-${entry.item.id}')),
+        );
+        final circle = tester.getRect(
+          find.byKey(ValueKey('sync-badge-${entry.item.id}')),
+        );
+        final local = entry.item.originId == harness.lan.identity.id;
+        expect(
+          circle.center.dx,
+          closeTo(
+            content.right - (local ? ChatMetrics.bubbleTailWidth : 0),
+            .1,
+          ),
+        );
+        expect(circle.center.dy, closeTo(content.bottom, .1));
       }
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());

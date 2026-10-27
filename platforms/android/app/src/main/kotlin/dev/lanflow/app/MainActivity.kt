@@ -391,7 +391,7 @@ class MainActivity : FlutterActivity() {
                         result.success(null)
                     }
                     "setForeground" -> {
-                        // Retained for older Dart clients; visibility no longer holds a Wi-Fi lock.
+                        if (call.arguments == true) ReceiverService.enable(this)
                         result.success(null)
                     }
                     "saveShareTarget" -> {
@@ -437,12 +437,7 @@ class MainActivity : FlutterActivity() {
                     }
                     "startReceiver" -> {
                         try {
-                            if (Build.VERSION.SDK_INT >= 33 &&
-                                checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                                requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 90)
-                            }
-                            val intent = Intent(this, ReceiverService::class.java)
-                            if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+                            ReceiverService.enable(this)
                             result.success(null)
                         } catch (e: Exception) { result.error("SERVICE", e.message, null) }
                     }

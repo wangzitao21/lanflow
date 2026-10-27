@@ -11,8 +11,10 @@ import 'package:lanflow/core/network/discovery.dart';
 import 'package:lanflow/core/network/identity.dart';
 import 'package:lanflow/core/network/models.dart';
 import 'package:lanflow/core/storage/local_store.dart';
+import 'package:lanflow/platform/native_core.dart';
 
 part 'legacy_transport.dart';
+part 'device_network.dart';
 
 class LanController extends ChangeNotifier {
   LanController({
@@ -45,6 +47,11 @@ class LanController extends ChangeNotifier {
   final Map<String, String> _pairingReceiveTokens = {};
   final Map<String, _IncomingFile> _incoming = {};
   final Map<String, HttpClient> _clients = {};
+  final Map<String, String> _networkKeys = {};
+  final Set<String> _forgottenPeers = {};
+  final Map<String, Future<void>> _networkExchanges = {};
+  final Set<HttpClient> _networkClients = {};
+  Timer? _networkTimer;
   Future<void> _sendQueue = Future.value();
   HttpServer? _server;
   DiscoveryService? _discovery;
@@ -78,7 +85,7 @@ class LanController extends ChangeNotifier {
   Peer get self => Peer(
     id: identity.id,
     name: name,
-    platform: Platform.isAndroid ? 'android' : 'windows',
+    platform: Platform.operatingSystem,
     address: '',
     port: _server?.port ?? preferredPort,
     fingerprint: identity.fingerprint,
@@ -131,6 +138,7 @@ class LanController extends ChangeNotifier {
       }
       await receiveDirectory.create(recursive: true);
       identity = await Identity.load(store.deviceDirectory);
+      _loadDeviceNetwork(state);
       peers.clear();
       sessions.clear();
       messages.clear();
@@ -338,6 +346,7 @@ class LanController extends ChangeNotifier {
 
   void forgetPeer(String id) {
     sessions.remove(id);
+    _forgottenPeers.add(id);
     _scheduleExpiry();
     _persist();
     _changed();
@@ -414,6 +423,40 @@ class LanController extends ChangeNotifier {
     }
   }
 
+  Future<void> updatePeerAddress(String id, String input) async {
+    final old = peers[id];
+    if (old == null || !sessions.containsKey(id)) throw StateError('设备已移除');
+    final text = input.trim();
+    final uri = Uri.tryParse(text.contains('://') ? text : 'https://$text');
+    if (uri == null ||
+        uri.scheme != 'https' ||
+        uri.userInfo.isNotEmpty ||
+        uri.hasQuery ||
+        uri.hasFragment ||
+        (uri.path.isNotEmpty && uri.path != '/') ||
+        uri.port < 1 ||
+        uri.port > 65535) {
+      throw const FormatException('请输入设备上的地址，例如 192.168.1.8:53318');
+    }
+    final address = InternetAddress.tryParse(uri.host);
+    if (address == null || address.type != InternetAddressType.IPv4) {
+      throw const FormatException('请填写局域网 IPv4 地址');
+    }
+    final next = Peer.fromJson({
+      ...old.toJson(),
+      'port': uri.hasPort ? uri.port : servicePort,
+    }, address: address.address)..online = false;
+    peers[id] = next;
+    try {
+      await store.save(_state());
+    } on Object {
+      if (identical(peers[id], next)) peers[id] = old;
+      rethrow;
+    }
+    _scheduleExpiry();
+    _changed();
+  }
+
   Future<Map<String, dynamic>> _post(
     Peer peer,
     String path,
@@ -460,8 +503,8 @@ class LanController extends ChangeNotifier {
     );
   }
 
-  Future<void> connect(Peer peer) {
-    if (sessions.containsKey(peer.id)) return Future.value();
+  Future<void> connect(Peer peer, {bool rePair = false}) {
+    if (!rePair && sessions.containsKey(peer.id)) return Future.value();
     return _pairing.putIfAbsent(
       peer.id,
       () => _pair(peer).whenComplete(() {
@@ -492,8 +535,11 @@ class LanController extends ChangeNotifier {
         receiveToken: receiveToken,
         sendToken: sendToken,
       );
+      _forgottenPeers.remove(peer.id);
       _scheduleExpiry();
       _persist();
+      await refreshDeviceNetwork(peer);
+      _scheduleDeviceNetwork();
     } finally {
       _pairingReceiveTokens.remove(peer.id);
       pairingCodes.remove(peer.id);
@@ -576,6 +622,7 @@ class LanController extends ChangeNotifier {
           receiveToken: receiveToken,
           sendToken: token,
         );
+        _forgottenPeers.remove(peer.id);
         _observe(peer);
         _persist();
         await _reply(request, 200, {'token': receiveToken});
@@ -584,8 +631,9 @@ class LanController extends ChangeNotifier {
       final peerId = request.headers.value('X-Lanflow-Device');
       final session = sessions[peerId];
       if (session == null ||
-          request.headers.value(HttpHeaders.authorizationHeader) !=
-              'Bearer ${session.receiveToken}' ||
+          (request.headers.value(HttpHeaders.authorizationHeader) !=
+                  'Bearer ${session.receiveToken}' &&
+              !_acceptNetworkToken(request, peerId!)) ||
           !peers.containsKey(peerId)) {
         await _reply(request, 401, {'error': '连接已失效，请重新配对'});
         return;
@@ -593,9 +641,23 @@ class LanController extends ChangeNotifier {
       final peer = peers[peerId]!;
       peer.lastSeen = DateTime.now();
       peer.online = true;
+      if (route == '/v1/network' && request.method == 'POST') {
+        final data = await _readJson(request);
+        // Use the authenticated socket's address, not the last discovery record.
+        final sender = Peer.fromJson(
+          peer.toJson(),
+          address: request.connectionInfo!.remoteAddress.address,
+        );
+        _mergeDeviceNetwork(data, sender);
+        await _reply(request, 200, _deviceNetworkPayload());
+        return;
+      }
       if (route.startsWith('/v2/') || route.startsWith('/v3/')) {
         if (receivingPaused || onInboxRequest == null) {
-          await _reply(request, 503, {'error': '收件箱暂未就绪或已暂停同步'});
+          await _reply(request, 503, {
+            'error': receivingPaused ? '对方已暂停同步，恢复后会继续' : '对方正在准备同步，稍后自动重试',
+            'category': receivingPaused ? 'paused' : 'not_ready',
+          });
         } else {
           if (watching && !_watchingPeers.add(peer.id)) {
             await _reply(request, 409, {'error': '设备通知连接已存在'});
@@ -620,8 +682,12 @@ class LanController extends ChangeNotifier {
       await _handleLegacyRequest(request, route, peer);
     } on Object catch (e) {
       try {
-        await _reply(request, 400, {
-          'error': e is FormatException ? e.message : '请求无效或传输中断',
+        await _reply(request, e is NativeCoreError ? e.status : 400, {
+          'error': e is NativeCoreError
+              ? e.message
+              : e is FormatException
+              ? e.message
+              : '请求无效或传输中断',
         });
       } on Object {
         /* The sender may already have disconnected. */
@@ -713,6 +779,8 @@ class LanController extends ChangeNotifier {
     'receiveDirectory': receiveDirectory.path,
     'peers': peers.values.map((peer) => peer.toJson()).toList(),
     'sessions': sessions.map((key, value) => MapEntry(key, value.toJson())),
+    'networkKeys': _networkKeys,
+    'forgottenPeers': _forgottenPeers.toList(),
     'messages': messages
         .skip((messages.length - 2000).clamp(0, messages.length))
         .map((message) => message.toJson())
@@ -750,6 +818,10 @@ class LanController extends ChangeNotifier {
     _saveTimer?.cancel();
     _notifyTimer?.cancel();
     _expiryTimer?.cancel();
+    _networkTimer?.cancel();
+    for (final client in _networkClients.toList()) {
+      client.close(force: true);
+    }
     _discovery?.close();
     for (final client in _clients.values) {
       client.close(force: true);

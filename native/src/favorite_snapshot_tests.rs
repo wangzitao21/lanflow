@@ -14,16 +14,33 @@ fn legacy(id: &str, item: &Value, value: bool, revision: i64) -> Value {
 }
 
 #[test]
-fn independent_text_snapshot_deletion_and_trash_restore_survive_restart() {
+fn shared_favorite_follows_edits_and_deletion_survives_restart_and_late_favorite_replay() {
     let root = crate::tests::root();
     let item = note(1);
     let original = item["id"].as_str().unwrap();
     dispatch(json!({"op":"add","root":root,"item":item})).unwrap();
     let saved = favorite(&root, &item);
-    assert_ne!(saved["snapshotId"], item["id"]);
-    assert_eq!(saved["item"]["text"], item["text"]);
-    let snapshot = saved["snapshotId"].as_str().unwrap();
-    dispatch(json!({"op":"delete_favorites","root":root,"ids":[snapshot]})).unwrap();
+    dispatch(json!({"op":"edit_message","root":root,"id":original,"text":"current content"}))
+        .unwrap();
+    assert_eq!(state(&root, original)["item"]["text"], "current content");
+    dispatch(json!({"op":"delete_favorites","root":root,"ids":[saved["snapshotId"]]})).unwrap();
+    assert!(
+        initialize(&root).unwrap()["entries"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let trash = dispatch(json!({"op":"trash","root":root})).unwrap();
+    assert_eq!(trash.as_array().unwrap().len(), 1);
+    assert_eq!(trash[0]["source"], "conversation");
+    assert_eq!(trash[0]["id"], original);
+    dispatch(json!({"op":"close","root":root})).unwrap();
+    dispatch(json!({"op":"apply","root":root,"event":legacy("late-favorite-replay-01",&item,true,i64::MAX-1)})).unwrap();
+    assert_eq!(state(&root, original)["value"], false);
+    let restored = dispatch(json!({"op":"restore","root":root,"id":original})).unwrap();
+    assert_eq!(restored["entries"].as_array().unwrap().len(), 1);
+    assert_ne!(restored["entries"][0]["item"]["id"], item["id"]);
+    dispatch(json!({"op":"apply","root":root,"event":item_event(&item)})).unwrap();
     assert_eq!(
         initialize(&root).unwrap()["entries"]
             .as_array()
@@ -31,24 +48,6 @@ fn independent_text_snapshot_deletion_and_trash_restore_survive_restart() {
             .len(),
         1
     );
-    let trash = dispatch(json!({"op":"trash","root":root})).unwrap();
-    assert_eq!(trash[0]["source"], "favorite");
-    assert_eq!(trash[0]["id"], snapshot);
-    dispatch(json!({"op":"restore","root":root,"id":snapshot,"source":"favorite"})).unwrap();
-    dispatch(json!({"op":"delete","root":root,"id":original})).unwrap();
-    dispatch(json!({"op":"close","root":root})).unwrap();
-    let reopened = initialize(&root).unwrap();
-    assert!(reopened["entries"].as_array().unwrap().is_empty());
-    assert_eq!(reopened["favorites"][original]["item"], saved["item"]);
-    assert_eq!(reopened["favorites"][original]["savedAt"], saved["savedAt"]);
-    dispatch(json!({"op":"delete_favorites","root":root,"ids":[snapshot]})).unwrap();
-    let trash = dispatch(json!({"op":"trash","root":root})).unwrap();
-    assert_eq!(trash.as_array().unwrap().len(), 2);
-    dispatch(json!({"op":"restore_favorites","root":root,"ids":[snapshot]})).unwrap();
-    let restored = initialize(&root).unwrap();
-    assert!(restored["entries"].as_array().unwrap().is_empty());
-    assert_eq!(restored["favorites"][original]["value"], true);
-    assert_eq!(restored["favorites"][original]["item"], saved["item"]);
     crate::tests::cleanup(&root);
 }
 
@@ -192,7 +191,7 @@ fn equal_revision_legacy_flags_keep_the_same_winner_on_old_and_new_peers() {
 }
 
 #[test]
-fn linked_deletion_is_atomic_and_only_the_initiator_reads_its_local_setting() {
+fn linked_deletion_is_atomic_and_received_deletions_clear_favorites() {
     let a = crate::tests::root();
     let b = crate::tests::root();
     let item = note(5);
@@ -201,11 +200,11 @@ fn linked_deletion_is_atomic_and_only_the_initiator_reads_its_local_setting() {
         favorite(root, &item);
     }
     dispatch(json!({"op":"save_meta","root":b,"value":{"linkFavoriteDeletion":true}})).unwrap();
-    // A's default independent delete does not inherit B's linked policy.
+    // The deletion itself is authoritative on every device.
     dispatch(json!({"op":"delete","root":a,"id":item["id"]})).unwrap();
     let deletion = json!({"id":digest(format!("delete:{}",item["id"].as_str().unwrap()).as_bytes()),"type":"delete","target":item["id"]});
     dispatch(json!({"op":"apply","root":b,"event":deletion})).unwrap();
-    assert_eq!(state(&b, item["id"].as_str().unwrap())["value"], true);
+    assert_eq!(state(&b, item["id"].as_str().unwrap())["value"], false);
     let second = note(6);
     dispatch(json!({"op":"add","root":b,"item":second})).unwrap();
     let saved = favorite(&b, &second);
@@ -246,12 +245,9 @@ fn linked_deletion_is_atomic_and_only_the_initiator_reads_its_local_setting() {
             .is_empty()
     );
     dispatch(json!({"op":"restore_favorites","root":b,"ids":[saved["snapshotId"]]})).unwrap();
-    assert!(
-        initialize(&b).unwrap()["entries"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    let restored = initialize(&b).unwrap();
+    assert_eq!(restored["entries"].as_array().unwrap().len(), 1);
+    dispatch(json!({"op":"delete","root":b,"id":restored["entries"][0]["item"]["id"]})).unwrap();
     let third = note(7);
     dispatch(json!({"op":"add","root":b,"item":third})).unwrap();
     favorite(&b, &third);
@@ -304,7 +300,7 @@ fn linked_deletion_is_atomic_and_only_the_initiator_reads_its_local_setting() {
 }
 
 #[test]
-fn favorite_only_attachment_shares_blob_survives_backup_gc_and_independent_trash() {
+fn favorite_attachment_uses_one_blob_and_one_canonical_trash_record() {
     let root = crate::tests::root();
     initialize(&root).unwrap();
     let bytes = b"one immutable original attachment";
@@ -329,7 +325,7 @@ fn favorite_only_attachment_shares_blob_survives_backup_gc_and_independent_trash
     assert_eq!(fs::read_dir(root.join("files")).unwrap().count(), 1);
     dispatch(json!({"op":"close","root":root})).unwrap();
     assert_eq!(
-        maintenance_gc::cleanup(&root, true).unwrap()["removedFiles"],
+        maintenance_gc::cleanup(&root, false).unwrap()["removedFiles"],
         0
     );
     initialize(&root).unwrap();
@@ -359,15 +355,11 @@ fn favorite_only_attachment_shares_blob_survives_backup_gc_and_independent_trash
         0
     );
     initialize(&root).unwrap();
-    dispatch(json!({"op":"restore_favorites","root":root,"ids":[saved["snapshotId"]]})).unwrap();
-    assert!(
-        initialize(&root).unwrap()["entries"]
-            .as_array()
-            .unwrap()
-            .is_empty()
-    );
+    let restored = dispatch(json!({"op":"restore","root":root,"id":item["id"]})).unwrap();
+    let restored_id = restored["entries"][0]["item"]["id"].clone();
+    assert_eq!(restored["entries"].as_array().unwrap().len(), 1);
     assert_eq!(fs::read(&original).unwrap(), bytes);
-    dispatch(json!({"op":"delete_favorites","root":root,"ids":[saved["snapshotId"]]})).unwrap();
+    dispatch(json!({"op":"delete","root":root,"id":restored_id})).unwrap();
     dispatch(json!({"op":"close","root":root})).unwrap();
     assert_eq!(
         maintenance_gc::cleanup(&root, true).unwrap()["removedFiles"],

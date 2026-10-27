@@ -135,45 +135,44 @@ void main() {
     await tester.pumpWidget(const SizedBox.shrink());
   });
 
-  testWidgets(
-    'deletion feedback expires after one second even with Undo',
-    (tester) async {
-      late BuildContext target;
-      await tester.pumpWidget(
-        AppRoot(
-          home: Scaffold(
-            body: Builder(
-              builder: (context) {
-                target = context;
-                return const SizedBox.expand();
-              },
-            ),
+  testWidgets('deletion feedback expires after one second even with Undo', (
+    tester,
+  ) async {
+    late BuildContext target;
+    await tester.pumpWidget(
+      AppRoot(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) {
+              target = context;
+              return const SizedBox.expand();
+            },
           ),
         ),
-      );
-      showAppMessage(target, '已加入收藏');
-      await tester.pumpAndSettle();
-      expect(
-        tester.widget<SnackBar>(find.byType(SnackBar)).duration,
-        const Duration(milliseconds: 1500),
-      );
-      await tester.pump(const Duration(seconds: 2));
-      await tester.pumpAndSettle();
-      expect(find.byType(SnackBar), findsNothing);
-      showAppMessage(
-        target,
-        '已删除',
-        action: SnackBarAction(label: '撤销', onPressed: () {}),
-      );
-      await tester.pumpAndSettle();
-      expect(
-        tester.widget<SnackBar>(find.byType(SnackBar)).duration,
-        const Duration(seconds: 1),
-      );
-      expect(find.text('撤销'), findsOneWidget);
-      await tester.pump(const Duration(seconds: 3));
-      await tester.pumpAndSettle();
-      expect(find.byType(SnackBar), findsNothing);
-    },
-  );
+      ),
+    );
+    showAppMessage(target, '已加入收藏');
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SnackBar>(find.byType(SnackBar)).duration,
+      const Duration(seconds: 1),
+    );
+    await tester.pump(const Duration(seconds: 2));
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
+    showAppMessage(
+      target,
+      '已删除',
+      action: SnackBarAction(label: '撤销', onPressed: () {}),
+    );
+    await tester.pumpAndSettle();
+    expect(
+      tester.widget<SnackBar>(find.byType(SnackBar)).duration,
+      const Duration(seconds: 1),
+    );
+    expect(find.text('撤销'), findsOneWidget);
+    await tester.pump(const Duration(seconds: 3));
+    await tester.pumpAndSettle();
+    expect(find.byType(SnackBar), findsNothing);
+  });
 }

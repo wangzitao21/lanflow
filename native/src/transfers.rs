@@ -1,5 +1,113 @@
 use super::*;
 
+pub(super) fn schema(db: &Connection) -> Result<()> {
+    let existed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='transfer_changes')",
+        [],
+        |r| r.get(0),
+    )?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS transfer_clock(value INTEGER NOT NULL);
+        CREATE TABLE IF NOT EXISTS transfer_changes(endpoint TEXT NOT NULL,direction TEXT NOT NULL,event_id TEXT NOT NULL,revision INTEGER NOT NULL,PRIMARY KEY(endpoint,direction,event_id));
+        CREATE INDEX IF NOT EXISTS transfer_changes_revision ON transfer_changes(revision);
+        CREATE INDEX IF NOT EXISTS transfer_changes_endpoint_revision ON transfer_changes(endpoint,revision);")?;
+    if !existed {
+        db.execute_batch("INSERT INTO transfer_clock SELECT COALESCE(MAX(rowid),0) FROM transfer_jobs;
+            INSERT INTO transfer_changes SELECT endpoint,direction,event_id,rowid FROM transfer_jobs;")?;
+    }
+    for action in ["INSERT", "UPDATE", "DELETE"] {
+        let row = if action == "DELETE" { "OLD" } else { "NEW" };
+        db.execute_batch(&format!("CREATE TRIGGER IF NOT EXISTS transfer_changes_{action} AFTER {action} ON transfer_jobs BEGIN
+            UPDATE transfer_clock SET value=value+1;
+            INSERT INTO transfer_changes VALUES({row}.endpoint,{row}.direction,{row}.event_id,(SELECT value FROM transfer_clock))
+            ON CONFLICT(endpoint,direction,event_id) DO UPDATE SET revision=excluded.revision; END;"))?;
+    }
+    Ok(())
+}
+
+pub(super) fn updates(db: &Connection, request: &Value) -> Result<Value> {
+    let head: i64 = db.query_row("SELECT value FROM transfer_clock", [], |r| r.get(0))?;
+    let requested = request["after"].as_i64().unwrap_or(0).max(0);
+    let after = if requested > head { 0 } else { requested };
+    // Keep removals that happen during a paged initial load: an earlier page
+    // may already contain the job. Older removals need not be replayed.
+    let initial = if after == 0 {
+        Some(head)
+    } else {
+        request["initialThrough"]
+            .as_i64()
+            .filter(|value| *value >= 0 && *value <= head)
+    };
+    let endpoints = request["endpoints"]
+        .as_array()
+        .filter(|values| values.len() <= 256)
+        .ok_or("Invalid transfer endpoints")?;
+    if endpoints.iter().any(|e| !e.is_string()) {
+        return Err("Invalid transfer endpoints".into());
+    }
+    let mut statement = db.prepare("SELECT c.endpoint,c.direction,c.event_id,c.revision,j.body,j.transferred,j.state,j.error,j.retry_after,j.error_category,j.completed_at
+        FROM transfer_changes c LEFT JOIN transfer_jobs j ON j.endpoint=c.endpoint AND j.direction=c.direction AND j.event_id=c.event_id
+        WHERE c.revision>?1 AND c.endpoint IN (SELECT value FROM json_each(?2))
+        AND (?3 IS NULL OR c.revision>?3 OR (j.state IS NOT NULL AND j.state NOT IN ('completed','dismissed')))
+        ORDER BY c.revision LIMIT 201")?;
+    let rows = statement
+        .query_map(
+            params![after, serde_json::to_string(endpoints)?, initial],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                    r.get::<_, Option<i64>>(5)?,
+                    r.get::<_, Option<String>>(6)?,
+                    r.get::<_, Option<String>>(7)?,
+                    r.get::<_, Option<i64>>(8)?,
+                    r.get::<_, Option<String>>(9)?,
+                    r.get::<_, Option<i64>>(10)?,
+                ))
+            },
+        )?
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let more = rows.len() > 200;
+    let mut cursor = after;
+    let mut items = Vec::new();
+    let mut removed = Vec::new();
+    for (
+        endpoint,
+        direction,
+        event_id,
+        revision,
+        body,
+        transferred,
+        state,
+        error,
+        retry,
+        category,
+        completed,
+    ) in rows.into_iter().take(200)
+    {
+        cursor = revision;
+        if body.is_none()
+            || state
+                .as_deref()
+                .is_some_and(|v| matches!(v, "completed" | "dismissed"))
+        {
+            removed.push(json!(format!("{endpoint}:{direction}:{event_id}")));
+            continue;
+        }
+        let event: Value = serde_json::from_str(body.as_deref().unwrap())?;
+        items.push(json!({"endpoint":endpoint,"direction":direction,"eventId":event_id,
+            "item":events::transfer_item(&event).ok_or("Invalid transfer event")?,"transferred":transferred,"state":state,"error":error,
+            "retryAfter":retry.filter(|v|*v>0),"errorCategory":category,"completedAt":completed.filter(|v|*v>0)}));
+    }
+    let mut result = json!({"items":items,"removed":removed,"cursor":if more {cursor} else {head},"more":more,"reset":requested>head});
+    if more && initial.is_some() {
+        result["initialThrough"] = json!(initial);
+    }
+    Ok(result)
+}
+
 pub(super) fn scheduled(db: &Connection, key: &str) -> Result<Vec<(String, String, String, u64)>> {
     let mut statement = db.prepare("SELECT direction,event_id,body,transferred FROM transfer_jobs WHERE endpoint=? AND state IN ('queued','failed') AND retry_after<=? ORDER BY last_attempt,sequence LIMIT 4")?;
     Ok(statement
@@ -60,7 +168,7 @@ pub(super) fn queue_favorites(
 }
 
 pub(super) fn queue_missing_favorites(root: &Path, db: &Connection, key: &str) -> Result<()> {
-    let mut statement = db.prepare("SELECT e.sequence,e.body FROM favorites f JOIN events e ON e.id=f.event_id WHERE json_extract(f.body,'$.item.kind')!='text' AND (json_extract(f.body,'$.value')=1 OR EXISTS(SELECT 1 FROM favorite_trash t WHERE t.original_id=f.id))")?;
+    let mut statement = db.prepare("SELECT e.sequence,e.body FROM favorites f JOIN events e ON e.id=f.event_id WHERE NOT EXISTS(SELECT 1 FROM deleted d WHERE d.id=f.id) AND json_extract(f.body,'$.item.kind')!='text' AND (json_extract(f.body,'$.value')=1 OR EXISTS(SELECT 1 FROM favorite_trash t WHERE t.original_id=f.id))")?;
     let rows = statement
         .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -89,18 +197,58 @@ pub(super) fn queue_missing_favorites(root: &Path, db: &Connection, key: &str) -
 pub(super) fn list(db: &Connection) -> Result<Value> {
     query(
         db,
-        "state!='completed'",
+        "state NOT IN ('completed','dismissed')",
         "sequence,endpoint,direction,event_id",
         -1,
         0,
     )
 }
 
+pub(super) fn complete_local_downloads(root: &Path, shared: &Database) -> Result<()> {
+    let jobs = {
+        let db = shared.lock().map_err(|_| "Database unavailable")?;
+        let mut statement = db.prepare("SELECT endpoint,event_id,body FROM transfer_jobs WHERE direction='download' AND state IN ('queued','failed')")?;
+        statement
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })?
+            .collect::<std::result::Result<Vec<_>, _>>()?
+    };
+    for (key, event_id, body) in jobs {
+        let event: Value = serde_json::from_str(&body)?;
+        let Some(item) = events::transfer_item(&event) else {
+            continue;
+        };
+        let hash = string(item, "sha256")?;
+        let size = item["size"].as_u64().ok_or("Invalid file size")?;
+        if !verified_files::check(&attachments::path(root, hash), hash, size)? {
+            continue;
+        }
+        attachments::register(root, shared, item)?;
+        let mut db = shared.lock().map_err(|_| "Database unavailable")?;
+        if !active(&db, &key, "download", &event_id)? {
+            continue;
+        }
+        // A different route already supplied these bytes. No request to this
+        // possibly offline source is needed, and no remote receipt is invented.
+        apply(root, &mut db, &event, None)?;
+        if events::is_favorite(&event) {
+            favorites::touch(&db, &event)?;
+        }
+        complete(&db, &key, "download", &event_id, size)?;
+    }
+    Ok(())
+}
+
 pub(super) fn page(db: &Connection, request: &Value) -> Result<Value> {
     let filter = match request["scope"].as_str().unwrap_or("completed") {
-        "active" => "state!='completed'",
+        "active" => "state NOT IN ('completed','dismissed')",
         "completed" => "state='completed'",
-        "all" => "1",
+        "all" => "state!='dismissed'",
         _ => return Err("Invalid transfer scope".into()),
     };
     let offset = request["offset"].as_i64().unwrap_or(0).max(0);
@@ -166,10 +314,11 @@ pub(super) fn action(db: &Connection, request: &Value) -> Result<Value> {
         "pause" => "paused",
         "cancel" => "cancelled",
         "retry" => "queued",
+        "delete" => "dismissed",
         _ => return Err("Unknown transfer action".into()),
     };
     let changed = db.execute(
-        "UPDATE transfer_jobs SET state=?,error=NULL,error_category=NULL,retry_after=0,failures=0 WHERE endpoint=? AND direction=? AND event_id=? AND state!='completed'",
+        "UPDATE transfer_jobs SET state=?1,error=NULL,error_category=NULL,retry_after=0,failures=0 WHERE endpoint=?2 AND direction=?3 AND event_id=?4 AND (state!='completed' OR ?1='dismissed')",
         params![state,string(request,"endpoint")?,string(request,"direction")?,id(request,"eventId")?],
     )?;
     Ok(json!(changed > 0))
@@ -230,6 +379,59 @@ pub(super) fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deleted_tasks_stay_hidden_after_restart_and_explicit_reset_rebuilds_them() {
+        let root = crate::tests::root();
+        initialize(&root).unwrap();
+        let shared = database(&root).unwrap();
+        let mut item = json!({"id":"reset-task-item-aa","originId":"reset-device-aaaa","originName":"Device","createdAt":now(),"kind":"file","text":"","name":"file.bin","size":1,"sha256":digest(b"a")});
+        let first = item_event(&item);
+        item["id"] = json!("reset-task-item-bb");
+        let second = item_event(&item);
+        {
+            let db = shared.lock().unwrap();
+            for (sequence, event) in [(1, &first), (2, &second)] {
+                enqueue(
+                    &db,
+                    "device:test",
+                    "upload",
+                    &json!({"sequence":sequence,"event":event}),
+                )
+                .unwrap();
+            }
+            action(&db,&json!({"action":"delete","endpoint":"device:test","direction":"upload","eventId":first["id"]})).unwrap();
+            action(&db,&json!({"action":"pause","endpoint":"device:test","direction":"upload","eventId":second["id"]})).unwrap();
+            enqueue(
+                &db,
+                "device:test",
+                "upload",
+                &json!({"sequence":1,"event":first}),
+            )
+            .unwrap();
+            assert_eq!(list(&db).unwrap().as_array().unwrap().len(), 1);
+            assert!(scheduled(&db, "device:test").unwrap().is_empty());
+        }
+        drop(shared);
+        dispatch(json!({"op":"close","root":root})).unwrap();
+        assert_eq!(
+            dispatch(json!({"op":"transfers","root":root}))
+                .unwrap()
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        dispatch(json!({"op":"reset_endpoint","root":root,"key":"device:test"})).unwrap();
+        let shared = database(&root).unwrap();
+        let db = shared.lock().unwrap();
+        let jobs = scheduled(&db, "device:test").unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].1, first["id"].as_str().unwrap());
+        assert_eq!(list(&db).unwrap().as_array().unwrap().len(), 2);
+        drop(db);
+        crate::tests::cleanup(&root);
+    }
+
     #[test]
     fn healthy_large_transfers_yield_to_later_small_and_reverse_transfers() {
         let root = crate::tests::root();

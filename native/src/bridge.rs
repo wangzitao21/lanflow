@@ -73,11 +73,12 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         return storage::initialize_history(root, false);
     }
     if op == "sync" {
-        return sync::synchronize(
+        return sync::synchronize_with_budget(
             root,
             &request["endpoint"],
             request["knownRevision"].as_i64(),
             request["runId"].as_str(),
+            request["continuousFiles"] == true,
         );
     }
     if op == "begin_sync" {
@@ -87,6 +88,16 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         sync_control::cancel(root, request["key"].as_str());
         sync::forget_clients(root, request["key"].as_str());
         return Ok(json!(true));
+    }
+    if op == "interrupt_sync_transfer" {
+        return Ok(json!(sync_control::interrupt_files(
+            root,
+            string(&request, "key")?,
+            string(&request, "runId")?
+        )));
+    }
+    if op == "sync_file_activity" {
+        return Ok(json!(sync_control::file_activity(root)));
     }
     if op == "storage_stats" || op == "clear_preview_cache" {
         return maintenance::storage(root, op == "clear_preview_cache");
@@ -128,6 +139,13 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
                 if let Some(path) = attachments::register(root, &shared, item)? {
                     draft_paths.insert(string(item, "sha256")?.to_owned(), json!(path));
                 }
+            }
+        }
+    } else if op == "apply_batch" {
+        for event in events::batch_events(&request["events"])? {
+            if let Some(item) = events::transfer_item(event) {
+                validate_item(item)?;
+                attachment_changed |= attachments::register_changed(root, &shared, item)?.1;
             }
         }
     } else if let Some(item) = if op == "add" {
@@ -177,6 +195,23 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
             )?;
             Ok(json!(pending))
         }
+        "retry_endpoint" => {
+            let key = string(&request, "key")?;
+            sync::forget_clients(root, Some(key));
+            db.execute("UPDATE transfer_jobs SET state='queued',error=NULL,error_category=NULL,retry_after=0,failures=0 WHERE endpoint=? AND state='failed'", [key])?;
+            Ok(json!(true))
+        }
+        "reset_endpoint" => {
+            let key = string(&request,"key")?;
+            sync::forget_clients(root,Some(key));
+            let tx = db.transaction()?;
+            tx.execute("UPDATE cursors SET pushed=0,pulled=0 WHERE endpoint=?",[key])?;
+            tx.execute("DELETE FROM seen WHERE endpoint=?",[key])?;
+            tx.execute("DELETE FROM copies WHERE endpoint=?",[key])?;
+            tx.execute("UPDATE transfer_jobs SET state='queued',error=NULL,error_category=NULL,retry_after=0,failures=0,completed_at=0 WHERE endpoint=? AND state NOT IN ('paused','cancelled')",[key])?;
+            tx.commit()?;
+            Ok(json!(true))
+        }
         "items_page" => storage::items_page(&db, request["after"].as_i64().ok_or("Invalid cursor")?),
         "revision" => Ok(json!(db.query_row(
             "SELECT value FROM revision",
@@ -199,6 +234,16 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         "delete" => {
             let target = id(&request, "id")?;
             events::delete_many(root,&mut db,&json!([target]))?;
+            snapshot_since(&db, request["knownRevision"].as_i64())
+        }
+        "edit_message" => {
+            message_edits::edit(root, &mut db, &request)?;
+            snapshot_since(&db, request["knownRevision"].as_i64())
+        }
+        "resolve_message" => {
+            let mut request = request.clone();
+            request["resolve"] = json!(true);
+            message_edits::edit(root, &mut db, &request)?;
             snapshot_since(&db, request["knownRevision"].as_i64())
         }
         "trash" => maintenance::trash(root, &db),
@@ -228,10 +273,11 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
             snapshot_since(&db, request["knownRevision"].as_i64())
         }
         "transfers" => transfers::list(&db),
+        "transfer_updates" => transfers::updates(&db, &request),
         "transfers_page" => transfers::page(&db, &request),
         "transfer_action" => transfers::action(&db, &request),
         "transfer_blocked" => Ok(json!(db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE endpoint=? AND state IN ('paused','cancelled') AND COALESCE(json_extract(body,'$.item.sha256'),json_extract(body,'$.favorite.item.sha256'))=?)",
+            "SELECT EXISTS(SELECT 1 FROM transfer_jobs WHERE endpoint=? AND state IN ('paused','cancelled','dismissed') AND COALESCE(json_extract(body,'$.item.sha256'),json_extract(body,'$.favorite.item.sha256'))=?)",
             params![string(&request,"endpoint")?,string(&request,"digest")?], |r| r.get::<_,bool>(0)
         )?)),
         "conversation" => {
@@ -244,8 +290,14 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
                 )
                 .optional()?;
             let revision = Utc::now().timestamp_micros().max(previous.unwrap_or(0) + 1);
-            let conversation =
-                json!({"id":owner,"name":string(&request,"name")?,"revision":revision});
+            let previous_body: Option<String> = db.query_row("SELECT body FROM conversations WHERE id=?", [&owner], |r| r.get(0)).optional()?;
+            let mut conversation: Value = serde_json::from_str(previous_body.as_deref().unwrap_or("{}"))?;
+            conversation["id"] = json!(owner);
+            conversation["name"] = json!(string(&request,"name")?);
+            conversation["revision"] = json!(revision);
+            for key in ["avatar", "avatarColor"] {
+                if let Some(value) = request.get(key) { conversation[key] = value.clone(); }
+            }
             let event = json!({"id":uuid::Uuid::new_v4().simple().to_string(),"type":"conversation","conversation":conversation});
             apply(root, &mut db, &event, None)?;
             snapshot_since(&db, request["knownRevision"].as_i64())
@@ -265,14 +317,22 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
                 .as_str()
                 .or_else(|| previous["avatar"].as_str())
                 .unwrap_or("");
-            let profile = json!({"id":owner,"name":string(&request,"name")?,"avatar":avatar,"revision":revision});
+            let mut profile = json!({"id":owner,"name":string(&request,"name")?,"avatar":avatar,"revision":revision});
+            for key in ["avatarPreset", "avatarColor"] {
+                if let Some(value) = request.get(key).or_else(|| previous.get(key)) { profile[key] = value.clone(); }
+            }
             let event = json!({"id":uuid::Uuid::new_v4().simple().to_string(),"type":"profile","profile":profile});
             apply(root, &mut db, &event, None)?;
             snapshot_since(&db, request["knownRevision"].as_i64())
         }
         "page" => storage::requested_page(&db, request["after"].as_i64().unwrap_or(0), &request["capabilities"]),
-        "apply" => {
-            let changed = apply(root, &mut db, &request["event"], request["source"].as_str())? || attachment_changed;
+        "deletions" => reconciliation::deletion_page(&db,request["after"].as_i64().unwrap_or(0)),
+        "apply" | "apply_batch" => {
+            let changed = if op == "apply_batch" {
+                events::apply_batch(root, &mut db, &request["events"], request["source"].as_str())?
+            } else {
+                apply(root, &mut db, &request["event"], request["source"].as_str())?
+            } || attachment_changed;
             let mut state = snapshot_since(&db, request["knownRevision"].as_i64())?;
             state["ok"] = json!(true);
             state["changed"] = json!(changed);

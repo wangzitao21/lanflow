@@ -86,9 +86,23 @@ class WidgetInbox extends InboxController {
   }
 
   @override
-  Future<void> updateProfile(String name, {String? avatar}) async {
+  Future<void> updateProfile(
+    String name, {
+    String? avatar,
+    bool appearance = false,
+    String? preset,
+    int? color,
+  }) async {
     final gate = profileGate;
-    if (gate == null) return super.updateProfile(name, avatar: avatar);
+    if (gate == null) {
+      return super.updateProfile(
+        name,
+        avatar: avatar,
+        appearance: appearance,
+        preset: preset,
+        color: color,
+      );
+    }
     profileCalls++;
     await gate.future;
   }

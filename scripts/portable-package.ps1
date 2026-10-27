@@ -1,12 +1,13 @@
 $script:LanFlowPortableWorkspace = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot)).TrimEnd('\') + '\'
 
-function Assert-PortablePath([string]$Path) {
+function Assert-PortablePath([string]$Path, [string]$Workspace = $script:LanFlowPortableWorkspace) {
+    $workspacePrefix = [IO.Path]::GetFullPath($Workspace).TrimEnd('\') + '\'
     $full = [IO.Path]::GetFullPath($Path)
-    if (!$full.StartsWith($script:LanFlowPortableWorkspace, [StringComparison]::OrdinalIgnoreCase)) {
+    if (!$full.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
         throw "Portable package path must stay inside the workspace: $full"
     }
     $cursor = $full
-    while ($cursor.StartsWith($script:LanFlowPortableWorkspace, [StringComparison]::OrdinalIgnoreCase)) {
+    while ($cursor.StartsWith($workspacePrefix, [StringComparison]::OrdinalIgnoreCase)) {
         $item = Get-Item -LiteralPath $cursor -Force -ErrorAction SilentlyContinue
         if ($item -and ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
             throw "Portable package paths cannot contain links: $cursor"
@@ -23,9 +24,9 @@ function Get-PortableStreamHash([IO.Stream]$Stream) {
     finally { $Stream.Position = 0; $hash.Dispose() }
 }
 
-function Copy-PortableRelease([string]$Source, [string]$Destination) {
+function Copy-PortableRelease([string]$Source, [string]$Destination, [string]$SourceWorkspace = $script:LanFlowPortableWorkspace) {
     $ErrorActionPreference = 'Stop'
-    $sourceRoot = Assert-PortablePath $Source
+    $sourceRoot = Assert-PortablePath $Source -Workspace $SourceWorkspace
     $targetRoot = Assert-PortablePath $Destination
     $sourcePrefix = $sourceRoot.TrimEnd('\') + '\'
     $targetPrefix = $targetRoot.TrimEnd('\') + '\'
@@ -39,7 +40,7 @@ function Copy-PortableRelease([string]$Source, [string]$Destination) {
         # Acquire every existing package file before changing any contents. A
         # running executable or locked asset must not leave a half-updated app.
         foreach ($file in Get-ChildItem -LiteralPath $sourceRoot -File -Recurse | Sort-Object FullName) {
-            $sourcePath = Assert-PortablePath $file.FullName
+            $sourcePath = Assert-PortablePath $file.FullName -Workspace $SourceWorkspace
             $relative = $sourcePath.Substring($sourcePrefix.Length)
             $destinationPath = Assert-PortablePath (Join-Path $targetRoot $relative)
             if (!$destinationPath.StartsWith($targetPrefix, [StringComparison]::OrdinalIgnoreCase)) {

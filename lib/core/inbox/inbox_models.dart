@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:lanflow/core/network/models.dart';
+import 'sync_errors.dart';
 
 export 'favorite_preferences.dart';
 
@@ -55,6 +56,7 @@ class InboxItem {
     this.digest = '',
     this.conversationId = defaultConversationId,
     this.quote,
+    this.editHeads = const [],
   });
 
   final String id;
@@ -68,6 +70,8 @@ class InboxItem {
   final String digest;
   final String conversationId;
   final MessageQuote? quote;
+  // Local edit context travels with the displayed version, never as item data.
+  final List<String> editHeads;
   bool get isFile => kind != MessageKind.text;
 
   Map<String, dynamic> toJson() => {
@@ -101,6 +105,9 @@ class InboxItem {
           : null,
       conversationId:
           value['conversationId'] as String? ?? defaultConversationId,
+      editHeads: List<String>.unmodifiable(
+        value['editHeads'] as List? ?? const [],
+      ),
     );
     if (!inboxIdPattern.hasMatch(item.id) ||
         !inboxIdPattern.hasMatch(item.conversationId) ||
@@ -127,42 +134,90 @@ class InboxItem {
 }
 
 class Conversation {
-  const Conversation(this.id, this.name);
+  const Conversation(
+    this.id,
+    this.name, {
+    this.avatar,
+    this.avatarColor,
+    this.appearanceConfigured = false,
+  });
   final String id;
   final String name;
+  final String? avatar;
+  final int? avatarColor;
+  final bool appearanceConfigured;
+  factory Conversation.fromJson(String id, Map value) => Conversation(
+    id,
+    value['name'] as String,
+    avatar: value['avatar'] as String?,
+    avatarColor: value['avatarColor'] as int?,
+    appearanceConfigured:
+        value.containsKey('avatar') || value.containsKey('avatarColor'),
+  );
+}
+
+class MessageEditVersion {
+  MessageEditVersion.fromJson(Map value)
+    : id = value['id'] as String,
+      text = value['text'] as String,
+      name = value['name'] as String,
+      editorId = value['editorId'] as String?,
+      editorName = value['editorName'] as String? ?? '旧版设备',
+      editedAt = DateTime.tryParse(value['editedAt'] as String? ?? '');
+  final String id, text, name, editorName;
+  final String? editorId;
+  final DateTime? editedAt;
+}
+
+class MessageConflict {
+  MessageConflict.fromJson(Map value)
+    : id = value['id'] as String,
+      item = InboxItem.fromJson(
+        Map<String, dynamic>.from(value['item'] as Map),
+      ),
+      heads = List<String>.unmodifiable(value['heads'] as List),
+      versions = List<MessageEditVersion>.unmodifiable(
+        (value['versions'] as List).map(
+          (v) => MessageEditVersion.fromJson(v as Map),
+        ),
+      );
+  final String id;
+  final InboxItem item;
+  final List<String> heads;
+  final List<MessageEditVersion> versions;
 }
 
 class ConversationPreference {
   ConversationPreference({
     this.pinnedAt,
-    this.background,
     this.readThrough = 0,
     this.manualUnread = false,
     this.hiddenThrough,
     this.avatar,
+    this.avatarColor,
   });
   int? pinnedAt;
-  int? background;
   int readThrough;
   bool manualUnread;
   int? hiddenThrough;
   String? avatar;
+  int? avatarColor;
 
   Map<String, dynamic> toJson() => {
     'pinnedAt': pinnedAt,
-    'background': background,
     'readThrough': readThrough,
     'manualUnread': manualUnread,
     'hiddenThrough': hiddenThrough,
     'avatar': avatar,
+    'avatarColor': avatarColor,
   };
   factory ConversationPreference.fromJson(Map value) => ConversationPreference(
     pinnedAt: value['pinnedAt'] as int?,
-    background: value['background'] as int?,
     readThrough: value['readThrough'] as int? ?? 0,
     manualUnread: value['manualUnread'] == true,
     hiddenThrough: value['hiddenThrough'] as int?,
     avatar: value['avatar'] as String?,
+    avatarColor: value['avatarColor'] as int?,
   );
 }
 
@@ -170,7 +225,7 @@ class InboxEntry {
   InboxEntry(this.sequence, this.item, [Set<String>? copies])
     : copies = copies ?? {};
   final int sequence;
-  final InboxItem item;
+  InboxItem item;
   final Set<String> copies;
   Map<String, dynamic> toJson() => {
     'sequence': sequence,
@@ -293,7 +348,11 @@ class TransferTask {
       ),
       transferred = value['transferred'] as int,
       state = value['state'] as String,
-      error = value['error'] as String?,
+      error = syncErrorMessage(
+        value['error'] as String?,
+        value['errorCategory'] as String?,
+        isHub: (value['endpoint'] as String).startsWith('hub:'),
+      ),
       errorCategory = value['errorCategory'] as String?,
       retryAfter = value['retryAfter'] is int
           ? DateTime.fromMillisecondsSinceEpoch(
@@ -316,7 +375,14 @@ class TransferTask {
   String get key => '$endpoint:$direction:$eventId';
   bool get needsAttention =>
       state == 'failed' &&
-      !const {'offline', 'timeout', 'busy'}.contains(errorCategory);
+      !const {
+        'offline',
+        'timeout',
+        'busy',
+        'source_pending',
+        'paused',
+        'not_ready',
+      }.contains(errorCategory);
   bool get stopped => state == 'paused' || state == 'cancelled';
   double get progress => state == 'completed'
       ? 1

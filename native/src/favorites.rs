@@ -21,6 +21,17 @@ pub(super) fn schema(db: &Connection) -> Result<()> {
             &json!({"id":event_id,"type":"favorite","favorite":favorite}),
         )?;
     }
+    let shared: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM meta WHERE key='shared_favorites')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !shared {
+        db.execute("INSERT OR IGNORE INTO trash SELECT original_id,json_set(body,'$.id',original_id),deleted_at FROM favorite_trash WHERE original_id IN (SELECT id FROM deleted)",[])?;
+        db.execute("DELETE FROM favorite_trash WHERE original_id IN (SELECT id FROM deleted) OR original_id IN (SELECT id FROM items)",[])?;
+        db.execute("UPDATE favorites SET body=json_set(body,'$.sourceValue',json_extract(body,'$.value'),'$.value',json('false'),'$.sourceDeleted',json('true')) WHERE id IN (SELECT id FROM deleted)",[])?;
+        db.execute("INSERT INTO meta VALUES('shared_favorites','true')", [])?;
+    }
     Ok(())
 }
 
@@ -141,7 +152,11 @@ pub(super) fn apply_state(db: &Connection, event: &Value) -> Result<()> {
     let wins = if let Some((old_id, old)) = &previous {
         let old_revision = old["revision"].as_i64().unwrap_or(0);
         let old_state = canonical(old_id, old);
-        if revision == old_revision && state_id == old_state && old["value"] != value {
+        let old_value = old.get("sourceValue").unwrap_or(&old["value"]);
+        let old_value = old_value
+            .as_bool()
+            .or_else(|| old_value.as_i64().map(|value| value != 0));
+        if revision == old_revision && state_id == old_state && old_value != Some(value) {
             return Err(errors::api(409, "Favorite state identity conflicts"));
         }
         revision > old_revision
@@ -156,13 +171,18 @@ pub(super) fn apply_state(db: &Connection, event: &Value) -> Result<()> {
     if !wins {
         return Ok(());
     }
+    if deleted(db, &original)? {
+        body["sourceValue"] = json!(value);
+        body["sourceDeleted"] = json!(true);
+        body["value"] = json!(false);
+    }
     db.execute("INSERT INTO favorites(id,revision,event_id,body) VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,body=excluded.body",
         params![original,revision,transport_id,body.to_string()])?;
     if value {
         db.execute("DELETE FROM favorite_trash WHERE id=?", [&snapshot])?;
-    } else if body["item"].is_object() {
-        db.execute("INSERT INTO favorite_trash(id,original_id,body,favorite_body,deleted_at) VALUES(?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET original_id=excluded.original_id,body=excluded.body,favorite_body=excluded.favorite_body,deleted_at=excluded.deleted_at",
-            params![snapshot,original,body["item"].to_string(),body.to_string(),time_for(revision)])?;
+    } else {
+        // Removing a bookmark does not create another copy in the recycle bin.
+        db.execute("DELETE FROM favorite_trash WHERE id=?", [&snapshot])?;
     }
     Ok(())
 }
@@ -178,6 +198,20 @@ pub(super) fn hydrate_source(db: &Connection, original: &str) -> Result<()> {
 }
 
 pub(super) fn for_client(db: &Connection, mut body: Value) -> Result<Value> {
+    let original = string(&body, "id")?.to_owned();
+    if deleted(db, &original)? {
+        body["value"] = json!(false);
+    }
+    let current: Option<String> = db
+        .query_row("SELECT body FROM items WHERE id=?", [&original], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    if let Some(current) = current {
+        let mut item: Value = serde_json::from_str(&current)?;
+        item["id"] = json!(snapshot_id(&original));
+        body["item"] = events::normalize_item(&item)?;
+    }
     body["sourceExists"] = json!(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM items WHERE id=?)",
         [body["id"].as_str().unwrap_or("")],
@@ -189,8 +223,37 @@ pub(super) fn for_client(db: &Connection, mut body: Value) -> Result<Value> {
     Ok(body)
 }
 
-pub(super) fn linked(db: &Connection) -> Result<bool> {
-    Ok(db.query_row("SELECT COALESCE((SELECT json_extract(body,'$.linkFavoriteDeletion') FROM meta WHERE key='settings'),0)", [], |r| r.get(0))?)
+pub(super) fn linked(_: &Connection) -> Result<bool> {
+    Ok(true)
+}
+
+pub(super) fn source_changed(db: &Connection, original: &str) -> Result<()> {
+    if deleted(db, original)? {
+        db.execute("UPDATE favorites SET body=json_set(body,'$.sourceValue',COALESCE(json_extract(body,'$.sourceValue'),json_extract(body,'$.value')),'$.value',json('false'),'$.sourceDeleted',json('true')) WHERE id=?",[original])?;
+        db.execute("INSERT OR IGNORE INTO trash SELECT original_id,json_set(body,'$.id',original_id),deleted_at FROM favorite_trash WHERE original_id=?",[original])?;
+        db.execute("DELETE FROM favorite_trash WHERE original_id=?", [original])?;
+        db.execute(
+            "DELETE FROM transfer_jobs WHERE json_extract(body,'$.favorite.id')=?",
+            [original],
+        )?;
+    } else {
+        db.execute("UPDATE favorites SET body=body WHERE id=?", [original])?;
+    }
+    Ok(())
+}
+
+pub(super) fn archive_source(db: &Connection, original: &str) -> Result<()> {
+    let saved: Option<String> = db.query_row("SELECT json_extract(body,'$.item') FROM favorites WHERE id=? AND json_type(body,'$.item')='object'",[original],|r| r.get(0)).optional()?;
+    if let Some(saved) = saved {
+        let mut item: Value = serde_json::from_str(&saved)?;
+        item["id"] = json!(original);
+        item = message_edits::edited_item(db, &item)?;
+        db.execute(
+            "INSERT OR IGNORE INTO trash VALUES(?,?,?)",
+            params![original, item.to_string(), Utc::now().to_rfc3339()],
+        )?;
+    }
+    Ok(())
 }
 
 fn selected(ids: &Value) -> Result<std::collections::BTreeSet<String>> {
@@ -252,17 +315,13 @@ pub(super) fn remove_original(db: &Connection, original: &str) -> Result<()> {
     )
 }
 
-pub(super) fn set(root: &Path, db: &mut Connection, ids: &Value, value: bool) -> Result<()> {
+pub(super) fn set(_root: &Path, db: &mut Connection, ids: &Value, value: bool) -> Result<()> {
     let ids = selected(ids)?;
     let tx = db.transaction()?;
-    let link = linked(&tx)?;
     for original in ids {
         if !value {
             if state(&tx, &original)?.is_some_and(|(_, v)| v["value"] == true) {
                 remove_original(&tx, &original)?;
-                if link {
-                    events::delete_transaction(root, &tx, &original)?;
-                }
             }
             continue;
         }
@@ -299,6 +358,10 @@ pub(super) fn remove(root: &Path, db: &mut Connection, ids: &Value) -> Result<()
             remove_original(&tx, &original)?;
             if link {
                 events::delete_transaction(root, &tx, &original)?;
+                tx.execute(
+                    "UPDATE trash SET body=json_set(body,'$._wasFavorite',json('true')) WHERE id=?",
+                    [&original],
+                )?;
             }
         }
     }
@@ -310,13 +373,16 @@ pub(super) fn restore(root: &Path, db: &mut Connection, ids: &Value) -> Result<(
     let ids = selected(ids)?;
     let tx = db.transaction()?;
     for snapshot in ids {
-        let saved: Option<String> = tx
+        let mut saved: Option<String> = tx
             .query_row(
                 "SELECT favorite_body FROM favorite_trash WHERE id=?",
                 [&snapshot],
                 |r| r.get(0),
             )
             .optional()?;
+        if saved.is_none() {
+            saved = tx.query_row("SELECT body FROM favorites WHERE json_extract(body,'$.snapshotId')=? AND id IN (SELECT id FROM trash) AND id IN (SELECT id FROM deleted)",[&snapshot],|r| r.get(0)).optional()?;
+        }
         if let Some(saved) = saved {
             let saved: Value = serde_json::from_str(&saved)?;
             let item = &saved["item"];
@@ -328,22 +394,68 @@ pub(super) fn restore(root: &Path, db: &mut Connection, ids: &Value) -> Result<(
             {
                 return Err("收藏附件尚未下载完成".into());
             }
+            let original = string(&saved, "id")?;
+            let removed = deleted(&tx, original)?;
+            let restored = if removed {
+                digest(format!("restore:{original}").as_bytes())
+            } else {
+                original.to_owned()
+            };
+            if deleted(&tx, &restored)? {
+                return Err("此内容已恢复过，请在回收站中恢复较新的记录".into());
+            }
+            let existing: Option<String> = tx
+                .query_row("SELECT body FROM items WHERE id=?", [&restored], |r| {
+                    r.get(0)
+                })
+                .optional()?;
+            let mut canonical = if let Some(existing) = existing {
+                serde_json::from_str::<Value>(&existing)?
+            } else {
+                let trash: Option<String> = tx
+                    .query_row("SELECT body FROM trash WHERE id=?", [original], |r| {
+                        r.get(0)
+                    })
+                    .optional()?;
+                let mut canonical = trash
+                    .map(|body| serde_json::from_str::<Value>(&body))
+                    .transpose()?
+                    .unwrap_or_else(|| item.clone());
+                canonical["id"] = json!(restored);
+                canonical = events::normalize_item(&canonical)?;
+                events::apply_transaction(root, &tx, &item_event(&canonical), None)?;
+                canonical
+            };
+            canonical["id"] = json!(restored);
             emit(
                 &tx,
-                string(&saved, "id")?,
+                &restored,
                 true,
-                Some(item.clone()),
+                Some(canonical),
                 saved["savedAt"].as_str().map(str::to_owned),
             )?;
+            tx.execute("DELETE FROM favorite_trash WHERE id=?", [&snapshot])?;
+            if removed {
+                tx.execute("DELETE FROM trash WHERE id=?", [original])?;
+            }
         }
     }
     tx.commit()?;
     Ok(())
 }
 
+pub(super) fn restore_mark(db: &Connection, item: &Value, previous: &str) -> Result<()> {
+    let saved =
+        state(db, previous)?.and_then(|(_, body)| body["savedAt"].as_str().map(str::to_owned));
+    emit(db, string(item, "id")?, true, Some(item.clone()), saved)
+}
+
 pub(super) fn retained(db: &Connection, event: &Value) -> Result<bool> {
     let favorite = &event["favorite"];
     if !favorite["item"].is_object() {
+        return Ok(false);
+    }
+    if deleted(db, string(favorite, "id")?)? {
         return Ok(false);
     }
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM favorites WHERE id=?1 AND json_extract(body,'$.value')=1) OR EXISTS(SELECT 1 FROM favorite_trash WHERE original_id=?1)", [string(favorite,"id")?], |r|r.get(0))?)

@@ -106,7 +106,7 @@ fn core(request: Value) -> Value {
 }
 
 #[test]
-fn favorite_attachment_syncs_after_source_deletion_and_restores_only_to_favorites_on_new_device() {
+fn deleted_favorite_attachments_disappear_on_reconnected_and_new_devices() {
     let mut nas = Nas::new();
     let client_root =
         std::env::temp_dir().join(format!("lanflow-favorite-sync-{}", uuid::Uuid::new_v4()));
@@ -128,7 +128,6 @@ fn favorite_attachment_syncs_after_source_deletion_and_restores_only_to_favorite
     original["sha256"] = stored["sha256"].clone();
     core(json!({"op":"add","root":a,"item":original}));
     let saved=core(json!({"op":"set_favorites","root":a,"ids":[original["id"]],"value":true}))["favorites"][original["id"].as_str().unwrap()].clone();
-    core(json!({"op":"delete","root":a,"id":original["id"]}));
     let sync = |root: &PathBuf, nas: &Nas| {
         let code: Value =
             serde_json::from_slice(&URL_SAFE_NO_PAD.decode(&nas.code[9..]).unwrap()).unwrap();
@@ -143,12 +142,12 @@ fn favorite_attachment_syncs_after_source_deletion_and_restores_only_to_favorite
         panic!("favorite synchronization did not settle");
     };
     sync(&a, &nas);
-    assert!(nas.get("/v2/items")["items"].as_array().unwrap().is_empty());
+    assert_eq!(nas.get("/v2/items")["items"].as_array().unwrap().len(),1);
     nas.restart();
     core(json!({"op":"open","root":b}));
     sync(&b, &nas);
     let received = core(json!({"op":"snapshot","root":b}));
-    assert!(received["entries"].as_array().unwrap().is_empty());
+    assert_eq!(received["entries"].as_array().unwrap().len(),1);
     let favorite = &received["favorites"][original["id"].as_str().unwrap()];
     assert_eq!(favorite["item"], saved["item"]);
     assert_eq!(
@@ -156,34 +155,19 @@ fn favorite_attachment_syncs_after_source_deletion_and_restores_only_to_favorite
         bytes
     );
     core(json!({"op":"close","root":b}));
-    assert_eq!(
-        core(json!({"op":"open","root":b}))["favorites"],
-        received["favorites"]
-    );
-    core(json!({"op":"delete_favorites","root":b,"ids":[saved["snapshotId"]]}));
-    sync(&b, &nas);
+    core(json!({"op":"delete","root":a,"id":original["id"]}));
+    sync(&a,&nas);
+    nas.restart();
+    core(json!({"op":"open","root":b}));
+    sync(&b,&nas);
     core(json!({"op":"open","root":c}));
-    sync(&c, &nas);
-    let deleted = core(json!({"op":"snapshot","root":c}));
-    assert_eq!(
-        deleted["favorites"][original["id"].as_str().unwrap()]["value"],
-        false
-    );
-    let trash = core(json!({"op":"trash","root":c}));
-    let trashed = trash
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|value| value["source"] == "favorite")
-        .unwrap();
-    assert_eq!(trashed["available"], true);
-    core(json!({"op":"restore","root":c,"source":"favorite","id":trashed["id"]}));
-    let restored = core(json!({"op":"snapshot","root":c}));
-    assert!(restored["entries"].as_array().unwrap().is_empty());
-    assert_eq!(
-        restored["favorites"][original["id"].as_str().unwrap()]["value"],
-        true
-    );
+    sync(&c,&nas);
+    for root in [&a,&b,&c] {
+        let state=core(json!({"op":"snapshot","root":root}));
+        assert!(state["entries"].as_array().unwrap().is_empty());
+        assert_eq!(state["favorites"][original["id"].as_str().unwrap()]["value"],false);
+        assert!(core(json!({"op":"transfers","root":root})).as_array().unwrap().is_empty());
+    }
     for root in [&a, &b, &c] {
         core(json!({"op":"close","root":root}));
     }

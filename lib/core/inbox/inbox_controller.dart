@@ -14,6 +14,7 @@ import 'package:lanflow/core/inbox/inbox_sync.dart';
 import 'package:lanflow/core/inbox/sync_watch.dart';
 import 'sync_retry_policy.dart';
 import 'sync_progress.dart';
+import 'sync_errors.dart';
 import 'package:lanflow/core/network/network_state.dart';
 import 'package:lanflow/core/network/lan_controller.dart';
 import 'package:lanflow/core/network/models.dart';
@@ -41,6 +42,12 @@ class InboxController extends ChangeNotifier {
   final Map<String, SyncStatus> statuses = {};
   final Map<String, SyncWatch> _watches = {};
   final Set<String> _pendingSync = {};
+  final Map<String, int> _pendingPulls = {};
+  int _pullGeneration = 0;
+  void _expectRemoteChanges(String key) {
+    _pendingPulls[key] = ++_pullGeneration;
+  }
+
   final Map<String, int> _requestedContent = {};
   Timer? _kick;
   Timer? _retryTimer;
@@ -48,15 +55,20 @@ class InboxController extends ChangeNotifier {
   late final SyncProgress _progress;
   Future<void>? _transferRefresh;
   bool _refreshTransfersAgain = false;
-  String _transferSignature = '';
+  int _transferRevision = 0;
+  int? _transferInitialThrough;
+  Set<String> _transferBindings = {};
+  final Map<String, TransferTask> _transferCache = {};
   final Map<String, ({int bytes, DateTime at, double rate})> _transferSamples =
       {};
   List<TransferTask> transferTasks = [];
-  Future<void>? _running;
+  final Map<String, Future<void>> _syncJobs = {};
+  final Map<String, List<Completer<void>>> _syncWaiters = {};
+  final Set<String> _forcedSync = {};
+  final Map<String, String> _networkExchanged = {};
   Future<void>? _startup;
   final Set<Future<void>> _localOperations = {};
   Future<void> _favoritePreferenceWrites = Future.value();
-  bool _syncAgain = false;
   bool _closed = false;
   bool ready = false;
   int loadingRecords = 0, totalRecords = 0;
@@ -64,12 +76,14 @@ class InboxController extends ChangeNotifier {
   bool _migrateAgain = false;
   Future<void>? _legacyImportTask;
   int _activeSynchronizations = 0;
+  int _fileSynchronizations = 0;
   final List<_MessageSearch> _searchQueue = [];
   _MessageSearch? _activeSearch;
   Future<void>? _searchWorker;
   bool _wasPaused = false;
   bool _foreground = true;
   bool _networkAvailable = true;
+  int _networkGeneration = 0;
   NetworkState _networkState = const NetworkState();
 
   void setForeground(bool value) => _setForeground(value);
@@ -94,7 +108,9 @@ class InboxController extends ChangeNotifier {
   bool get syncing => statuses.values.any((s) => s.busy);
   int get activeTransferCount =>
       _activeSynchronizations + lan.activeTransferCount;
-  bool get transferring => activeTransferCount > 0;
+  bool get transferring =>
+      !lan.receivingPaused &&
+      (_fileSynchronizations > 0 || lan.activeTransferCount > 0);
   String? readingConversation;
   Timer? _readSaveTimer;
   bool _readStateDirty = false;
@@ -130,7 +146,7 @@ class InboxController extends ChangeNotifier {
     return _groupedItems[id] ?? const [];
   }
 
-  List<Conversation> get conversations {
+  Map<String, Conversation> get _allConversations {
     items;
     final all = <String, Conversation>{
       defaultConversationId: const Conversation(defaultConversationId, '发给自己'),
@@ -139,6 +155,39 @@ class InboxController extends ChangeNotifier {
     for (final id in store.historyConversations) {
       all.putIfAbsent(id, () => Conversation(id, '同步中的会话'));
     }
+    return all;
+  }
+
+  bool _ensureConversationOrder() {
+    final all = _allConversations;
+    if (store.conversationOrder.isEmpty) {
+      // Preserve the previous order once when upgrading. Subsequent activity
+      // never sorts conversations by their latest message again.
+      final initial = all.values.toList()
+        ..sort((a, b) {
+          final left = store.latestIn(a.id)?.item.createdAt;
+          final right = store.latestIn(b.id)?.item.createdAt;
+          if (left != null && right != null) {
+            final order = right.compareTo(left);
+            if (order != 0) return order;
+          }
+          if (left != null && right == null) return -1;
+          if (left == null && right != null) return 1;
+          return a.id.compareTo(b.id);
+        });
+      store.conversationOrder.addAll(initial.map((c) => c.id));
+      return initial.isNotEmpty;
+    }
+    final known = store.conversationOrder.toSet();
+    final added = all.keys.where((id) => !known.contains(id)).toList();
+    store.conversationOrder.addAll(added);
+    return added.isNotEmpty;
+  }
+
+  List<Conversation> get conversations {
+    final all = _allConversations;
+    final ordered = {...store.conversationOrder, ...all.keys}.toList();
+    final ranks = {for (var i = 0; i < ordered.length; i++) ordered[i]: i};
     return all.values.where((conversation) {
       final hidden = store.preference(conversation.id).hiddenThrough;
       return hidden == null ||
@@ -152,14 +201,51 @@ class InboxController extends ChangeNotifier {
         final order = rightPin.compareTo(leftPin);
         if (order != 0) return order;
       }
-      final left = store.latestIn(a.id)?.item.createdAt;
-      final right = store.latestIn(b.id)?.item.createdAt;
-      if (left != null && right != null) return right.compareTo(left);
-      if (left != null) return -1;
-      if (right != null) return 1;
-      return a.id.compareTo(b.id);
+      return ranks[a.id]!.compareTo(ranks[b.id]!);
     });
   }
+
+  Future<void> reorderConversation(String id, int newIndex) =>
+      _trackLocal(() async {
+        if (store.preference(id).pinnedAt != null) return;
+        _ensureConversationOrder();
+        final visible = conversations.map((c) => c.id).toList();
+        final oldIndex = visible.indexOf(id);
+        if (oldIndex < 0) return;
+        final pinned = visible
+            .where((id) => store.preference(id).pinnedAt != null)
+            .length;
+        final destination = newIndex.clamp(pinned, visible.length - 1);
+        visible
+          ..removeAt(oldIndex)
+          ..insert(destination, id);
+        final unpinned = visible
+            .where((id) => store.preference(id).pinnedAt == null)
+            .toList();
+        final editable = unpinned.toSet();
+        final previous = List<String>.of(store.conversationOrder);
+        var cursor = 0;
+        final next = [
+          for (final old in previous)
+            editable.contains(old) ? unpinned[cursor++] : old,
+        ];
+        if (listEquals(previous, next)) return;
+        store.conversationOrder
+          ..clear()
+          ..addAll(next);
+        _changed();
+        try {
+          await store.save();
+        } on Object {
+          if (listEquals(store.conversationOrder, next)) {
+            store.conversationOrder
+              ..clear()
+              ..addAll(previous);
+            _changed();
+          }
+          rethrow;
+        }
+      });
 
   String get conversationId => store.currentConversation;
   Conversation get conversation => conversations.firstWhere(
@@ -319,18 +405,6 @@ class InboxController extends ChangeNotifier {
     _changed();
   }
 
-  Future<void> setConversationBackground(String id, int? color) async {
-    final previous = store.preference(id).background;
-    store.preference(id).background = color;
-    try {
-      await store.save();
-    } on Object {
-      store.preference(id).background = previous;
-      rethrow;
-    }
-    _changed();
-  }
-
   Future<void> deleteConversation(String id) => _trackLocal(() async {
     final through = await store.removeConversation(id);
     final preference = store.preference(id);
@@ -402,12 +476,49 @@ class InboxController extends ChangeNotifier {
       (id == lan.identity.id ? lan.name : lan.peers[id]?.name) ??
       fallback;
   String? deviceAvatar(String id) => store.profiles[id]?['avatar'] as String?;
-  Future<void> updateProfile(String name, {String? avatar}) async {
-    await store.setProfile(lan.identity.id, name, avatar: avatar);
+  String? deviceAvatarPreset(String id) =>
+      store.profiles[id]?['avatarPreset'] as String?;
+  int? deviceAvatarColor(String id) =>
+      store.profiles[id]?['avatarColor'] as int?;
+  Future<void> updateProfile(
+    String name, {
+    String? avatar,
+    bool appearance = false,
+    String? preset,
+    int? color,
+  }) async {
+    await store.setProfile(
+      lan.identity.id,
+      name,
+      avatar: avatar,
+      appearance: appearance,
+      preset: preset,
+      color: color,
+    );
     lan.updateSettings(deviceName: name);
     _changed();
     if (automaticSync) requestSync();
   }
+
+  Future<void> setDeviceAppearance(
+    String id, {
+    String? avatar,
+    String? preset,
+    int? color,
+  }) => _trackLocal(() async {
+    final hub = store.hubs.where((hub) => hub.id == id).firstOrNull;
+    final name = deviceName(id, hub?.name ?? '我的设备');
+    await store.setProfile(
+      id,
+      name,
+      avatar: avatar,
+      appearance: true,
+      preset: preset,
+      color: color,
+    );
+    _changed();
+    if (automaticSync) requestSync(immediate: true);
+  });
 
   Future<void> deleteItem(InboxItem item) => _trackLocal(() async {
     await store.remove(item.id);
@@ -438,7 +549,7 @@ class InboxController extends ChangeNotifier {
   List<FavoriteEntry> get favoriteEntries => store.favoriteEntries;
   FavoritePreferences get favoritePreferences => store.favoritePreferences;
   int get favoritePreferencesRevision => store.favoritePreferencesRevision;
-  bool get linkFavoriteDeletion => store.linkFavoriteDeletion;
+  bool get linkFavoriteDeletion => true;
 
   Future<void> setFavoritePreferences(FavoritePreferences value) {
     final base = favoritePreferences;
@@ -502,18 +613,6 @@ class InboxController extends ChangeNotifier {
     return operation;
   });
 
-  Future<void> setLinkFavoriteDeletion(bool value) => _trackLocal(() async {
-    final previous = store.linkFavoriteDeletion;
-    store.linkFavoriteDeletion = value;
-    try {
-      await store.save();
-    } catch (_) {
-      store.linkFavoriteDeletion = previous;
-      rethrow;
-    }
-    _changed();
-  });
-
   Future<void> deleteFavorites(Iterable<String> ids) => _trackLocal(() async {
     await store.deleteFavorites(ids);
     _changed();
@@ -545,8 +644,16 @@ class InboxController extends ChangeNotifier {
       'offline',
       'timeout',
       'busy',
+      'source_pending',
+      'paused',
+      'not_ready',
       'authentication',
+      'identity',
       'storage',
+      'remote_storage',
+      'protocol',
+      'conflict',
+      'integrity',
       'invalid',
       'cancelled',
       'unknown',
@@ -568,6 +675,7 @@ class InboxController extends ChangeNotifier {
       'storageReady': ready && store.loaded,
       'localErrorPresent': error != null || lan.error != null,
       'messages': store.messageCount,
+      'messageConflicts': store.conflicts.length,
       'conversations': conversations.length,
       'favorites': favoriteEntries.length,
       'pairedDevices': lan.sessions.length,
@@ -635,6 +743,24 @@ class InboxController extends ChangeNotifier {
     if (automaticSync) requestSync();
   });
 
+  Future<void> editMessage(
+    InboxItem item, {
+    required String text,
+    String? name,
+  }) => _trackLocal(() async {
+    if (!ready) throw StateError('请等待本机收件箱启动完成');
+    await store.editMessage(
+      item.id,
+      text: text,
+      name: name ?? item.name,
+      parents: item.editHeads,
+      editorId: lan.identity.id,
+      editorName: lan.name,
+    );
+    _changed();
+    if (automaticSync) requestSync(immediate: true);
+  });
+
   Future<void> refreshTransfers() {
     if (_closed || !ready) return Future.value();
     _refreshTransfersAgain = true;
@@ -663,58 +789,114 @@ class InboxController extends ChangeNotifier {
   }
 
   Future<void> _readTransferSnapshot() async {
-    final saved = await store.transfers();
-    // Retain durable jobs for a later rebind, but only show current bindings.
-    // Sessions remain available when a paired device is offline or undiscovered.
     final bound = {
       ...store.hubs.map((hub) => hub.key),
       ...lan.sessions.keys.map((id) => 'device:$id'),
     };
-    final values = saved
-        .where((value) => bound.contains(value['endpoint']))
-        .toList();
-    final tasks = values.map(TransferTask.fromJson).toList();
+    var changed = false;
+    if (!setEquals(bound, _transferBindings)) {
+      _transferBindings = bound;
+      _transferRevision = 0;
+      _transferInitialThrough = null;
+      _transferCache.clear();
+      _transferSamples.clear();
+      changed = true;
+    }
+    final page = await store.transferUpdates(
+      bound,
+      _transferRevision,
+      initialThrough: _transferInitialThrough,
+    );
+    if (_closed) return;
+    final current = {
+      ...store.hubs.map((h) => h.key),
+      ...lan.sessions.keys.map((id) => 'device:$id'),
+    };
+    if (!setEquals(bound, current)) {
+      _refreshTransfersAgain = true;
+      return;
+    }
+    if (page['reset'] == true) {
+      _transferCache.clear();
+      _transferSamples.clear();
+      changed = true;
+    }
+    for (final key in (page['removed'] as List).cast<String>()) {
+      changed = _transferCache.remove(key) != null || changed;
+      _transferSamples.remove(key);
+    }
     final now = DateTime.now();
-    for (final task in tasks) {
+    for (final value in (page['items'] as List).cast<Map>()) {
+      final task = TransferTask.fromJson(Map<String, dynamic>.from(value));
       final old = _transferSamples[task.key];
-      var rate = old?.rate ?? 0.0;
-      if (old == null || task.stopped || task.state == 'failed') {
-        rate = 0;
+      var rate = 0.0;
+      if (!task.stopped && task.state != 'failed' && task.transferred > 0) {
+        if (old != null && task.transferred > old.bytes) {
+          final seconds = now.difference(old.at).inMilliseconds / 1000;
+          rate = seconds > 0 ? (task.transferred - old.bytes) / seconds : 0;
+          if (old.rate > 0 && rate > 0) rate = old.rate * .6 + rate * .4;
+        }
         _transferSamples[task.key] = (
           bytes: task.transferred,
           at: now,
           rate: rate,
         );
-      } else if (old.bytes != task.transferred) {
-        final seconds = now.difference(old.at).inMilliseconds / 1000;
-        rate = seconds <= 0 || task.transferred < old.bytes
-            ? 0
-            : (task.transferred - old.bytes) / seconds;
-        if (old.rate > 0 && rate > 0) rate = old.rate * .6 + rate * .4;
-        _transferSamples[task.key] = (
-          bytes: task.transferred,
-          at: now,
-          rate: rate,
-        );
-      } else if (now.difference(old.at).inSeconds >= 3) {
-        rate = 0;
+      } else {
+        _transferSamples.remove(task.key);
       }
       task.bytesPerSecond = rate;
+      _transferCache[task.key] = task;
+      changed = true;
     }
-    final keys = tasks.map((t) => t.key).toSet();
-    _transferSamples.removeWhere((key, _) => !keys.contains(key));
-    final signature =
-        '${jsonEncode(values)}:${tasks.map((t) => t.bytesPerSecond.round()).join(',')}';
-    if (!_closed && signature != _transferSignature) {
-      _transferSignature = signature;
-      transferTasks = tasks;
+    for (final entry in _transferSamples.entries.toList()) {
+      if (now.difference(entry.value.at).inSeconds >= 3) {
+        final task = _transferCache[entry.key];
+        if (task != null && task.bytesPerSecond != 0) {
+          task.bytesPerSecond = 0;
+          changed = true;
+        }
+        _transferSamples.remove(entry.key);
+      }
+    }
+    _transferRevision = page['cursor'] as int;
+    _transferInitialThrough = page['initialThrough'] as int?;
+    if (page['more'] == true) _refreshTransfersAgain = true;
+    final active = _activeSynchronizations == 0
+        ? 0
+        : await NativeCore.run({
+                'op': 'sync_file_activity',
+                'root': store.directory.path,
+              })
+              as int;
+    if (!_closed && active != _fileSynchronizations) {
+      _fileSynchronizations = active;
+      _activityChanged();
+    }
+    if (!_closed && changed) {
+      transferTasks = _transferCache.values.toList();
       _activityChanged();
     }
   }
 
   Future<void> controlTransfer(TransferTask task, String action) async {
     await store.transferAction(task, action);
+    if (action == 'delete') {
+      // Let an already-started chunk settle, but prevent its later receipt.
+      if (task.state != 'completed') {
+        await _sync.cancel(task.endpoint);
+      }
+      final status = statuses[task.endpoint];
+      if (status?.failures == 0) {
+        status?.error = null;
+        status?.errorCategory = null;
+        status?.needsAttention = false;
+        status?.retryAfter = null;
+      }
+    }
     await refreshTransfers();
+    if (action == 'delete' && automaticSync) {
+      requestSync(endpoint: task.endpoint);
+    }
     if (action == 'retry') {
       statuses[task.endpoint]?.retryAfter = null;
       statuses[task.endpoint]?.needsAttention = false;
@@ -723,6 +905,92 @@ class InboxController extends ChangeNotifier {
       requestSync();
     }
   }
+
+  Future<void> resetSync(String endpoint) => _trackLocal(() async {
+    if (_closed || !ready) throw StateError('请稍后重试同步');
+    if (!syncTargets.any((target) => target.key == endpoint)) {
+      throw StateError('设备已移除');
+    }
+    _pendingSync.remove(endpoint);
+    await _sync.cancel(endpoint);
+    if (_closed || !syncTargets.any((target) => target.key == endpoint)) {
+      throw StateError('设备已移除');
+    }
+    await NativeCore.run({
+      'op': 'reset_endpoint',
+      'root': store.directory.path,
+      'key': endpoint,
+    });
+    statuses.remove(endpoint);
+    _requestedContent.remove(endpoint);
+    _expectRemoteChanges(endpoint);
+    await store.refresh();
+    await refreshTransfers();
+    _changed();
+    if (automaticSync) requestSync(endpoint: endpoint, immediate: true);
+  });
+
+  Future<void> updateDeviceAddress(String id, String address) =>
+      _trackLocal(() async {
+        final key = 'device:$id';
+        await _sync.cancel(key);
+        await lan.updatePeerAddress(id, address);
+        statuses.remove(key);
+        _requestedContent.remove(key);
+        _changed();
+        if (automaticSync) requestSync(endpoint: key, immediate: true);
+      });
+
+  Future<void> updateHub(
+    SyncEndpoint old, {
+    required String address,
+    required String name,
+    String code = '',
+  }) => _trackLocal(() async {
+    var settings = old.toJson();
+    if (code.trim().isNotEmpty) {
+      final raw = code.trim();
+      if (!raw.startsWith('lanflow1:')) {
+        throw const FormatException('NAS 连接码无效');
+      }
+      settings = Map<String, dynamic>.from(
+        jsonDecode(
+              utf8.decode(
+                base64Url.decode(base64Url.normalize(raw.substring(9))),
+              ),
+            )
+            as Map,
+      );
+    }
+    final next = SyncEndpoint.hub({
+      ...settings,
+      'url': parseHubAddress(address).toString(),
+      'name': name.trim().isEmpty ? old.name : name.trim(),
+    });
+    if (next.name.length > 60) throw const FormatException('设备名称最多 60 个字');
+    final index = store.hubs.indexWhere((hub) => hub.key == old.key);
+    if (index < 0) throw StateError('设备已移除');
+    if (store.hubs.any((hub) => hub.key != old.key && hub.key == next.key)) {
+      throw StateError('此 NAS 已在列表中');
+    }
+    await _sync.cancel(old.key);
+    store.hubs[index] = next;
+    try {
+      await store.save();
+    } on Object {
+      store.hubs[index] = old;
+      rethrow;
+    }
+    _watches.remove(old.key)?.close();
+    _pendingSync.remove(old.key);
+    _pendingPulls.remove(old.key);
+    _requestedContent.remove(old.key);
+    statuses.remove(old.key);
+    await refreshTransfers();
+    _changed();
+    _updateWatches();
+    if (automaticSync) requestSync(endpoint: next.key, immediate: true);
+  });
 
   // Include paired devices even while discovery has no usable address for them.
   List<SyncTarget> get syncTargets => [
@@ -739,7 +1007,36 @@ class InboxController extends ChangeNotifier {
   String endpointName(String key) =>
       syncTargets.where((e) => e.key == key).firstOrNull?.name ?? '未连接的设备';
 
-  List<SyncTarget> get syncProblems => syncTargets
+  List<MessageConflict> get syncProblems => store.conflicts;
+  MessageConflict? conflictFor(String id) =>
+      store.conflicts.where((conflict) => conflict.id == id).firstOrNull;
+
+  Future<void> resolveConflict(
+    MessageConflict conflict, {
+    String? versionId,
+    String? text,
+    String? name,
+  }) => _trackLocal(() async {
+    await store.resolveMessage(
+      conflict,
+      versionId: versionId,
+      text: text,
+      name: name,
+      editorId: lan.identity.id,
+      editorName: lan.name,
+    );
+    _changed();
+    if (automaticSync) requestSync(immediate: true);
+  });
+
+  Future<void> deleteConflict(MessageConflict conflict) =>
+      _trackLocal(() async {
+        await store.remove(conflict.id);
+        _changed();
+        if (automaticSync) requestSync(immediate: true);
+      });
+
+  List<SyncTarget> get connectionProblems => syncTargets
       .where(
         (target) =>
             statuses[target.key]?.needsAttention == true ||
@@ -750,26 +1047,52 @@ class InboxController extends ChangeNotifier {
       .toList();
 
   String? syncProblemDetail(String endpoint) =>
+      (statuses[endpoint]?.needsAttention == true
+          ? statuses[endpoint]?.error
+          : null) ??
       transferTasks
-          .where((task) => task.endpoint == endpoint && task.state == 'failed')
+          .where((task) => task.endpoint == endpoint && task.needsAttention)
           .firstOrNull
           ?.error ??
       statuses[endpoint]?.error;
 
   Future<void> retrySync(String endpoint) async {
     // An explicit retry bypasses backoff, but never resumes paused/cancelled jobs.
-    await _running;
     if (_closed || !ready || !lan.ready) throw StateError('请稍后重试同步');
     if (lan.receivingPaused) throw StateError('同步已暂停，请先恢复同步');
     if (!endpoints.any((target) => target.key == endpoint)) {
       throw StateError('设备离线');
     }
-    final failed = transferTasks
-        .where((task) => task.endpoint == endpoint && task.state == 'failed')
-        .toList();
-    for (final task in failed) {
-      await store.transferAction(task, 'retry');
+    if (!endpoints.any(
+      (target) => target.key == endpoint && _endpointAvailable(target),
+    )) {
+      throw StateError('当前网络无法连接此设备，请检查网络后重试');
     }
+    _pendingSync.remove(endpoint);
+    await _sync.cancel(endpoint);
+    await _syncJobs[endpoint];
+    if (_closed || !ready || !lan.ready) throw StateError('请稍后重试同步');
+    if (lan.receivingPaused) throw StateError('同步已暂停，请先恢复同步');
+    if (!endpoints.any((target) => target.key == endpoint)) {
+      throw StateError('设备离线');
+    }
+    if (!endpoints.any(
+      (target) => target.key == endpoint && _endpointAvailable(target),
+    )) {
+      throw StateError('当前网络无法连接此设备，请检查网络后重试');
+    }
+    await NativeCore.run({
+      'op': 'retry_endpoint',
+      'root': store.directory.path,
+      'key': endpoint,
+    });
+    final status = statuses.putIfAbsent(endpoint, SyncStatus.new);
+    status.needsAttention = false;
+    status.error = null;
+    status.errorCategory = null;
+    status.failures = 0;
+    status.retryAfter = null;
+    _activityChanged();
     await refreshTransfers();
     await _runSync(force: true, targets: {endpoint});
   }
@@ -824,7 +1147,20 @@ class InboxController extends ChangeNotifier {
       return TargetCopyStatus(target, CopyState.syncing, '同步中');
     }
     if (task?.state == 'failed') {
-      return TargetCopyStatus(target, CopyState.waiting, '等待自动重试');
+      return TargetCopyStatus(
+        target,
+        CopyState.waiting,
+        '等待自动重试',
+        detail: task?.error,
+      );
+    }
+    if (status?.error != null) {
+      return TargetCopyStatus(
+        target,
+        CopyState.waiting,
+        '等待自动重试',
+        detail: status?.error,
+      );
     }
     if (status?.online == true) {
       return TargetCopyStatus(target, CopyState.waiting, '等待同步');
@@ -833,6 +1169,7 @@ class InboxController extends ChangeNotifier {
   }
 
   String copyStatus(InboxEntry entry) {
+    if (conflictFor(entry.item.id) != null) return '内容冲突，待选择';
     final details = copyDetails(entry);
     if (details.isEmpty) return '已保存到本机';
     final completed = details
@@ -842,7 +1179,7 @@ class InboxController extends ChangeNotifier {
     if (completed == details.length) return count;
     final pending = details.where((s) => s.state != CopyState.complete);
     final label = pending.any((s) => s.state == CopyState.failed)
-        ? '同步失败，需处理'
+        ? '连接或传输待处理'
         : pending.any((s) => s.state == CopyState.cancelled)
         ? '部分传输已取消'
         : pending.any((s) => s.state == CopyState.paused)
@@ -859,10 +1196,7 @@ class InboxController extends ChangeNotifier {
     final targets = syncTargets;
     if (targets.isEmpty) return '未连接设备';
     if (lan.receivingPaused) return '同步已暂停';
-    final online = targets.where((t) => statuses[t.key]?.online == true).length;
-    return online == 0
-        ? '已绑定 ${targets.length} 台设备'
-        : '$online/${targets.length} 台在线';
+    return '已绑定 ${targets.length} 台设备';
   }
 
   Future<void> start() {
@@ -884,6 +1218,9 @@ class InboxController extends ChangeNotifier {
         },
       );
       if (_closed) return;
+      await store.migrateConversationAvatars();
+      if (_closed) return;
+      if (_ensureConversationOrder()) await store.save();
       appearance.value = store.appearance;
       language.value = store.language;
       ready = true;
@@ -907,6 +1244,9 @@ class InboxController extends ChangeNotifier {
         await store.setProfile(lan.identity.id, lan.name);
       }
       if (automaticSync) {
+        for (final endpoint in endpoints) {
+          _expectRemoteChanges(endpoint.key);
+        }
         _updateWatches();
         requestSync();
       }
@@ -956,18 +1296,28 @@ class InboxController extends ChangeNotifier {
     _changed();
   }
 
-  Future<void> setConversationAvatar(String id, String? avatar) async {
-    final preference = store.preference(id);
-    final previous = preference.avatar;
-    preference.avatar = avatar;
-    try {
-      await store.save();
-    } on Object {
-      preference.avatar = previous;
-      rethrow;
-    }
+  Future<void> setConversationAvatar(
+    String id,
+    String? avatar, {
+    int? color,
+  }) async {
+    final name =
+        store.conversations[id]?.name ??
+        (id == defaultConversationId ? '发给自己' : '同步中的会话');
+    await store.setConversation(
+      id,
+      name,
+      appearance: true,
+      avatar: avatar,
+      avatarColor: color,
+    );
     _changed();
+    if (automaticSync) requestSync();
   }
+
+  String? conversationAvatar(String id) => store.conversations[id]?.avatar;
+  int? conversationAvatarColor(String id) =>
+      store.conversations[id]?.avatarColor;
 
   Future<void> retryLocalSave() async {
     _draftTimer?.cancel();
@@ -993,6 +1343,7 @@ class InboxController extends ChangeNotifier {
   Future<void> removeDevice(String id) async {
     _watches.remove('device:$id')?.close();
     _pendingSync.remove('device:$id');
+    _pendingPulls.remove('device:$id');
     _requestedContent.remove('device:$id');
     lan.forgetPeer(id);
     await _sync.cancel('device:$id');
@@ -1310,6 +1661,7 @@ class InboxController extends ChangeNotifier {
   Future<void> removeHub(SyncEndpoint hub) => _trackLocal(() async {
     _watches.remove(hub.key)?.close();
     _pendingSync.remove(hub.key);
+    _pendingPulls.remove(hub.key);
     _requestedContent.remove(hub.key);
     store.hubs.removeWhere((e) => e.id == hub.id);
     await _sync.cancel(hub.key);
@@ -1333,6 +1685,9 @@ class InboxController extends ChangeNotifier {
     )) {
       if (_requestedContent[target.key] != store.changeCursor) {
         _requestedContent[target.key] = store.changeCursor;
+        unawaited(
+          _sync.interruptTransfers(target.key).catchError((Object _) {}),
+        );
         final status = statuses[target.key];
         // New content gets an immediate attempt. An old offline backoff must
         // never delay a message the user has just sent to a now reachable peer.
@@ -1341,15 +1696,13 @@ class InboxController extends ChangeNotifier {
       _pendingSync.add(target.key);
     }
     if (_kick != null || _pendingSync.isEmpty) return;
-    if (_running != null) {
-      _syncAgain = true;
+    if (_syncJobs.isNotEmpty) {
+      _pumpSync();
       return;
     }
     _kick = Timer(Duration(milliseconds: immediate ? 0 : 80), () {
       _kick = null;
-      final targets = Set<String>.of(_pendingSync);
-      _pendingSync.clear();
-      unawaited(_runSync(force: false, targets: targets));
+      _pumpSync();
     });
   }
 
@@ -1367,6 +1720,11 @@ class InboxController extends ChangeNotifier {
 
   void _changed() {
     if (!_closed) {
+      if (ready && store.loaded && _ensureConversationOrder()) {
+        unawaited(
+          store.save().catchError((Object e) => reportError('会话顺序保存失败：$e')),
+        );
+      }
       final reading = readingConversation;
       if (ready &&
           reading != null &&
@@ -1409,7 +1767,8 @@ class InboxController extends ChangeNotifier {
     _progress.stop();
     await _sync.close();
     await _startup;
-    await _running;
+    _pumpSync();
+    await Future.wait(_syncJobs.values.toList());
     await _searchWorker;
     // A failed progress read must not skip the final durable save. Accepted
     // reads still finish before the native store is closed.
@@ -1423,6 +1782,7 @@ class InboxController extends ChangeNotifier {
     lan.transferActivity.removeListener(_activityChanged);
     if (_closed && store.releaseClosedHistory()) {
       transferTasks = [];
+      _transferCache.clear();
       _transferSamples.clear();
       _unreadCounts.clear();
     }
