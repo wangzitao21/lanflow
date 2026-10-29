@@ -86,7 +86,8 @@ void main() {
       await harness.inbox.addText('把随手想到的事情放在这里。');
       await harness.inbox.setConversationAvatar(ideas.id, 'star', color:0xFFE6E0F0);
       await harness.inbox.setConversationUnread(ideas.id, true);
-      harness.inbox.relocateStorage = (_, _) async {};
+      harness.inbox.relocateStorage =
+          (_, _, {bool createIfEmpty = false}) async {};
       harness.inbox.selectConversation(defaultConversationId);
     });
     final key = GlobalKey();

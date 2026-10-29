@@ -327,8 +327,11 @@ class _LanFlowHostState extends State<LanFlowHost> {
     }
   }
 
-  Future<void> _relocate(String destination, bool migrate) =>
-      _changeStorage(destination, migrate);
+  Future<void> _relocate(
+    String destination,
+    bool migrate, {
+    bool createIfEmpty = false,
+  }) => _changeStorage(destination, migrate, createIfEmpty: createIfEmpty);
 
   Future<RuntimeSession> _openLike(
     RuntimeSession previous,
@@ -492,6 +495,7 @@ class _LanFlowHostState extends State<LanFlowHost> {
     String destination,
     bool migrate, {
     String? archive,
+    bool createIfEmpty = false,
   }) async {
     if (_changing || !mounted) return;
     // Reserve the operation before validation yields, so double taps cannot
@@ -507,8 +511,20 @@ class _LanFlowHostState extends State<LanFlowHost> {
     RuntimeSession? next;
     var closed = false;
     var committed = false;
+    var existingData = false;
     try {
-      final target = await widget.location.validate(origin, destination);
+      final switching = !migrate && archive == null;
+      final target = await widget.location.validate(
+        origin,
+        destination,
+        allowExisting: switching,
+      );
+      if (switching) {
+        existingData = await StorageLocation.containsData(target);
+        if (!existingData && !createIfEmpty) {
+          throw const FileSystemException('新位置没有数据，请确认是否新建');
+        }
+      }
       if (archive != null) {
         if (mounted) setState(() => _progress = '正在解压并校验备份…');
         restoration = await StorageBackup.restore(
@@ -522,7 +538,7 @@ class _LanFlowHostState extends State<LanFlowHost> {
       await PlatformBridge.suspendShares();
       closed = true;
       await _closePreservingEdits(previous);
-      if (archive == null) {
+      if (archive == null && migrate) {
         move = await widget.location.prepare(
           source: origin,
           destination: target.path,
@@ -538,28 +554,40 @@ class _LanFlowHostState extends State<LanFlowHost> {
           },
         );
       }
-      final local = LocalStore(target);
-      final localState = await local.load();
-      localState['receiveDirectory'] = StorageLayout.received(target).path;
-      if (!migrate && archive == null) localState['name'] = name;
-      final oldRoot = restoration?.sourceRoot ?? origin.path;
-      final oldPaths = p.Context(
-        style: p.windows.isAbsolute(oldRoot) ? p.Style.windows : p.Style.posix,
-      );
-      for (final message in localState['messages'] as List? ?? []) {
-        final path = message['path'];
-        if (path is String && oldPaths.isWithin(oldRoot, path)) {
-          message['path'] = p.joinAll([
-            target.path,
-            ...oldPaths.split(oldPaths.relative(path, from: oldRoot)),
-          ]);
+      if (switching) {
+        // Recheck after closing the old session. A removed disk must never be
+        // recreated just because it contained data when the dialog opened.
+        existingData = await StorageLocation.containsData(target);
+        if (!existingData && !createIfEmpty) {
+          throw const FileSystemException('新位置没有数据，请确认是否新建');
         }
       }
-      await local.save(localState);
+      if (!existingData) {
+        final local = LocalStore(target);
+        final localState = await local.load();
+        localState['receiveDirectory'] = StorageLayout.received(target).path;
+        if (!migrate && archive == null) localState['name'] = name;
+        final oldRoot = restoration?.sourceRoot ?? origin.path;
+        final oldPaths = p.Context(
+          style: p.windows.isAbsolute(oldRoot)
+              ? p.Style.windows
+              : p.Style.posix,
+        );
+        for (final message in localState['messages'] as List? ?? []) {
+          final path = message['path'];
+          if (path is String && oldPaths.isWithin(oldRoot, path)) {
+            message['path'] = p.joinAll([
+              target.path,
+              ...oldPaths.split(oldPaths.relative(path, from: oldRoot)),
+            ]);
+          }
+        }
+        await local.save(localState);
+      }
       // Opening the replacement validates and loads it once. The persistent
       // location is changed only after that session has started successfully.
       next = await _openLike(previous, target);
-      if (!migrate && archive == null) {
+      if (!migrate && archive == null && !existingData) {
         await next.inbox.setAppearance(appearance);
         await next.inbox.setLanguage(language);
       }
@@ -584,6 +612,8 @@ class _LanFlowHostState extends State<LanFlowHost> {
           ? cleaned
                 ? '数据已迁移到新位置'
                 : '已切换到新位置，部分旧文件仍保留在原位置'
+          : existingData
+          ? '已切换到所选位置的数据，原位置的数据保留。'
           : '已在新位置重新开始。原数据保留，其他设备需要重新绑定。';
       await next.listenShares();
     } on Object {

@@ -24,7 +24,9 @@ Future<void> main() async {
     }),
   );
   final output = Platform.environment['LANFLOW_BENCHMARK_OUTPUT'];
-  if (output == null || Platform.environment['LANFLOW_DATA_DIR'] == null) {
+  if (output == null ||
+      Platform.environment['LANFLOW_DATA_DIR'] == null ||
+      Platform.environment['LANFLOW_ISOLATED_STORAGE'] != '1') {
     throw StateError('Performance runs require isolated data and output paths');
   }
   try {

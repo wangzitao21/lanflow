@@ -114,6 +114,7 @@ void main() {
         String? archive,
         bool backup = false,
         bool? clearTrash,
+        bool createIfEmpty = false,
       }) async {
         var done = false;
         Object? error;
@@ -127,7 +128,11 @@ void main() {
               ? home.inbox.backupStorage!(target)
               : archive != null
               ? home.inbox.restoreStorage!(archive, target)
-              : home.inbox.relocateStorage!(target, migrate);
+              : home.inbox.relocateStorage!(
+                  target,
+                  migrate,
+                  createIfEmpty: createIfEmpty,
+                );
           unawaited(
             operation
                 .then<void>((_) {
@@ -288,7 +293,61 @@ void main() {
             'user-owned',
           );
         });
-        await relocate('${root.path}/fresh', false);
+        await relocate('${root.path}/needs-confirmation', false);
+        home = tester.widget<HomePage>(find.byType(HomePage));
+        expect(home.controller.store.directory.path, '${root.path}/restored');
+        expect(
+          await tester.runAsync(
+            () => Directory('${root.path}/needs-confirmation').exists(),
+          ),
+          false,
+        );
+
+        late String existingIdentity;
+        await tester.runAsync(() async {
+          final existing = await RuntimeSession.open(
+            Directory('${root.path}/existing-profile'),
+            name: '目标位置设备',
+            enableDiscovery: false,
+            preferredPort: 0,
+            bindAddress: InternetAddress.loopbackIPv4,
+          );
+          await existing.start();
+          existingIdentity = existing.lan.identity.id;
+          final item = (await existing.inbox.addText('目标位置独立记录'))!;
+          await existing.inbox.setFavorites([item.item.id], true);
+          existing.inbox.setDraft('目标位置草稿');
+          await existing.inbox.setAppearance('dark');
+          await existing.inbox.setLanguage('en');
+          await existing.close();
+          existing.dispose();
+        });
+        await relocate('${root.path}/existing-profile', false);
+        home = tester.widget<HomePage>(find.byType(HomePage));
+        expect(home.controller.identity.id, existingIdentity);
+        expect(home.controller.name, '目标位置设备');
+        expect(home.inbox.items.single.item.text, '目标位置独立记录');
+        expect(home.inbox.favoriteEntries, hasLength(1));
+        expect(home.inbox.store.draft, '目标位置草稿');
+        expect(home.inbox.appearance.value, 'dark');
+        expect(home.inbox.language.value, 'en');
+        expect(
+          (await tester.runAsync(location.resolve))!.path,
+          '${root.path}/existing-profile',
+        );
+        // Switching back must load the original profile rather than merge or
+        // overwrite either side, and the remembered path must follow it.
+        await relocate('${root.path}/restored', false);
+        home = tester.widget<HomePage>(find.byType(HomePage));
+        expect(home.controller.identity.id, identity);
+        expect(home.inbox.items.single.item.text, '迁移后仍能阅读');
+        expect(home.inbox.language.value, 'zh');
+        expect(
+          (await tester.runAsync(location.resolve))!.path,
+          '${root.path}/restored',
+        );
+
+        await relocate('${root.path}/fresh', false, createIfEmpty: true);
         home = tester.widget<HomePage>(find.byType(HomePage));
         expect(home.inbox.items, isEmpty);
         expect(home.controller.identity.id, isNot(identity));

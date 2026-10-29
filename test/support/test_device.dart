@@ -14,7 +14,7 @@ class TestDevice {
   final InboxController inbox;
   static Future<TestDevice> create(
     String path,
-    String name, {
+    String? name, {
     bool automaticSync = false,
   }) async {
     final lan = LanController(

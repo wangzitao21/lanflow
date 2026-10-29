@@ -33,7 +33,75 @@ class StorageLocation {
   };
   File get _file => File(p.join(bootstrap.path, 'system', _locator));
 
-  Future<Directory> resolve() async {
+  static const _databases = [
+    'system/messages.sqlite3',
+    '系统/messages.sqlite3',
+    'inbox/messages.sqlite3',
+    'messages.sqlite3',
+    'inbox.sqlite3',
+  ];
+  static const _identities = [
+    'system/device/identity.json',
+    'system/设备/identity.json',
+    '系统/device/identity.json',
+    '系统/设备/identity.json',
+    'identity.json',
+  ];
+
+  static Future<bool> _hasFile(Directory root, List<String> names) async {
+    var found = false;
+    for (final name in names) {
+      final path = p.joinAll([root.path, ...name.split('/')]);
+      final type = await FileSystemEntity.type(path, followLinks: false);
+      if (type == FileSystemEntityType.notFound) continue;
+      if (type != FileSystemEntityType.file) {
+        throw FileSystemException('数据文件无法读取，原文件已保留', path);
+      }
+      found = true;
+    }
+    return found;
+  }
+
+  // Inspect without opening SQLite or creating a replacement device identity.
+  static Future<bool> containsData(Directory root) async {
+    await StorageLocation(root)._checkLocatorDirectory();
+    final database = await _hasFile(root, _databases);
+    final identity = await _hasFile(root, _identities);
+    if (database && identity) return true;
+    var partial =
+        database ||
+        identity ||
+        await _hasFile(root, [
+          'state.json',
+          'state.backup.json',
+          'system/device/state.json',
+          'system/device/state.backup.json',
+        ]);
+    for (final name in _dataDirectories) {
+      final directory = Directory(p.join(root.path, name));
+      if (await FileSystemEntity.type(directory.path, followLinks: false) ==
+          FileSystemEntityType.link) {
+        throw const FormatException('数据目录包含链接，原文件已保留');
+      }
+      if (!await directory.exists()) continue;
+      await for (final entry in directory.list(followLinks: false)) {
+        final relative = p.relative(entry.path, from: root.path);
+        if (!_excluded.contains(relative) &&
+            relative != p.join('system', '.layout.lock')) {
+          partial = true;
+        }
+      }
+    }
+    if (partial) {
+      throw FileSystemException('所选位置的数据不完整，不能创建空白资料覆盖', root.path);
+    }
+    return false;
+  }
+
+  Future<Directory> resolve({
+    Directory? initialRoot,
+    Future<List<Directory>> Function()? recoveryRoots,
+  }) async {
     await _checkLocatorDirectory();
     var hadLocator = false;
     for (final name in [
@@ -45,31 +113,79 @@ class StorageLocation {
       '$_locator.backup',
     ]) {
       final file = File(p.join(bootstrap.path, name));
-      if (!await file.exists()) continue;
+      final type = await FileSystemEntity.type(file.path, followLinks: false);
+      if (type == FileSystemEntityType.notFound) continue;
+      if (type != FileSystemEntityType.file) {
+        throw FileSystemException('存储位置配置无法读取，请保留原数据', file.path);
+      }
       hadLocator = true;
+      Map value;
       try {
-        final value = jsonDecode(await file.readAsString());
-        if (value is! Map ||
-            value['path'] is! String ||
-            !p.isAbsolute(value['path'] as String)) {
+        final decoded = jsonDecode(await file.readAsString());
+        if (decoded is! Map ||
+            decoded['path'] is! String ||
+            !p.isAbsolute(decoded['path'] as String) ||
+            (decoded['initialized'] != null &&
+                decoded['initialized'] is! bool)) {
           throw const FormatException('存储位置配置无效');
         }
-        final root = Directory(value['path'] as String);
-        if (!await root.exists()) {
-          throw FileSystemException('存储位置暂时不可用，请连接磁盘后重试', root.path);
-        }
-        if (name != p.join('system', _locator) &&
-            name != p.join('system', '$_locator.backup')) {
-          await activate(root);
-          await confirm();
-        }
-        return root;
+        value = decoded;
       } on FormatException {
         continue;
       }
+      final root = Directory(p.normalize(value['path'] as String));
+      if (!await root.exists()) {
+        throw FileSystemException('存储位置暂时不可用，请连接磁盘后重试', root.path);
+      }
+      if (initialRoot != null &&
+          !p.equals(root.path, initialRoot.absolute.path)) {
+        throw const FileSystemException('启动路径与已保存的存储位置不同，请在设置中更改位置');
+      }
+      final hasData = await containsData(root);
+      if (value['initialized'] == true && !hasData) {
+        throw FileSystemException('原存储位置的数据缺失，请恢复原数据后重试', root.path);
+      }
+      // Repair all copies, including a recovered backup, before opening data.
+      await activate(root);
+      await confirm();
+      return root;
     }
     if (hadLocator) throw const FormatException('存储位置配置无法读取，请保留原数据');
-    return bootstrap;
+    // An interrupted write is evidence of an earlier selection, not first use.
+    for (final relative in _excluded.where(
+      (name) => name.endsWith('.pending'),
+    )) {
+      if (await FileSystemEntity.type(p.join(bootstrap.path, relative)) !=
+          FileSystemEntityType.notFound) {
+        throw const FileSystemException('存储位置保存未完成，请恢复位置配置后重试');
+      }
+    }
+    final candidates = <Directory>[];
+    for (final candidate in [bootstrap, ...?await recoveryRoots?.call()]) {
+      if (await containsData(candidate) &&
+          !candidates.any(
+            (known) => p.equals(known.absolute.path, candidate.absolute.path),
+          )) {
+        candidates.add(candidate);
+      }
+    }
+    if (initialRoot != null &&
+        !candidates.any(
+          (known) => p.equals(known.absolute.path, initialRoot.absolute.path),
+        )) {
+      // An explicit first-run path is persisted in the normal configuration
+      // directory, so removing the environment variable cannot switch datasets.
+      await containsData(initialRoot);
+      candidates.add(initialRoot);
+    }
+    if (candidates.length > 1) {
+      throw const FileSystemException('发现多个数据位置，请确认原存储位置，原数据均已保留');
+    }
+    final root = candidates.isEmpty ? bootstrap : candidates.single;
+    await root.create(recursive: true);
+    await activate(root);
+    await confirm();
+    return root;
   }
 
   Future<void> activate(Directory root) async {
@@ -78,7 +194,12 @@ class StorageLocation {
     final pending = File('${_file.path}.pending');
     final backup = File('${_file.path}.backup');
     await pending.writeAsString(
-      jsonEncode({'path': root.absolute.path}),
+      jsonEncode({
+        'path': p.normalize(root.absolute.path),
+        'initialized':
+            await _hasFile(root, _databases) &&
+            await _hasFile(root, _identities),
+      }),
       flush: true,
     );
     if (await _file.exists()) {
@@ -102,7 +223,16 @@ class StorageLocation {
     final backup = File('${_file.path}.backup');
     if (await backup.exists()) await backup.delete();
     await pending.rename(backup.path);
-    for (final prefix in ['', '系统']) {
+    // Keep another committed pair outside system/. Losing that directory must
+    // not turn a previously selected disk into a fresh default installation.
+    for (final name in [_locator, '$_locator.backup']) {
+      final copy = File(p.join(bootstrap.path, name));
+      final pendingCopy = File('${copy.path}.pending');
+      await pendingCopy.writeAsString(await _file.readAsString(), flush: true);
+      if (await copy.exists()) await copy.delete();
+      await pendingCopy.rename(copy.path);
+    }
+    for (final prefix in ['系统']) {
       for (final name in [
         _locator,
         '$_locator.backup',
@@ -141,7 +271,11 @@ class StorageLocation {
     }
   }
 
-  Future<Directory> validate(Directory source, String destination) async {
+  Future<Directory> validate(
+    Directory source,
+    String destination, {
+    bool allowExisting = false,
+  }) async {
     if (!p.isAbsolute(destination)) throw const FormatException('请选择完整的存储路径');
     final requested = Directory(p.normalize(destination));
     if (await FileSystemEntity.type(requested.path, followLinks: false) ==
@@ -165,7 +299,9 @@ class StorageLocation {
         p.isWithin(target.path, origin)) {
       throw const FormatException('新位置必须与当前数据文件夹分开，不能互相包含');
     }
-    if (await target.exists() && !await target.list().isEmpty) {
+    if (!allowExisting &&
+        await target.exists() &&
+        !await target.list().isEmpty) {
       throw const FormatException('所选位置已有文件，请选择空文件夹，原文件不会被覆盖');
     }
     return target;

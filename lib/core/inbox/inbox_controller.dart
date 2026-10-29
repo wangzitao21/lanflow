@@ -114,7 +114,8 @@ class InboxController extends ChangeNotifier {
   String? readingConversation;
   Timer? _readSaveTimer;
   bool _readStateDirty = false;
-  Future<void> Function(String destination, bool migrate)? relocateStorage;
+  Future<void> Function(String destination, bool migrate, {bool createIfEmpty})?
+  relocateStorage;
   Future<void> Function(String destination)? backupStorage;
   Future<void> Function(String archivePath, String destination)? restoreStorage;
   Future<Map<String, dynamic>> Function(bool clearTrash)? cleanupStorage;

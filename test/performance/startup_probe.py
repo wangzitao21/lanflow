@@ -26,7 +26,7 @@ user.GetClassNameW.argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
 samples = []
 first_frames = []
 for run in range(args.count):
-    env = {**os.environ, "LANFLOW_DATA_DIR": str(data)}
+    env = {**os.environ, "LANFLOW_DATA_DIR": str(data), "LANFLOW_ISOLATED_STORAGE": "1"}
     env.pop("LANFLOW_START_HIDDEN", None)
     start = time.perf_counter()
     process = subprocess.Popen(

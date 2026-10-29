@@ -113,8 +113,9 @@ class RuntimeFeedback extends StatelessWidget {
 }
 
 class StartupFailure extends StatefulWidget {
-  const StartupFailure({super.key, required this.onRetry});
+  const StartupFailure({super.key, required this.onRetry, this.reason});
   final Future<void> Function() onRetry;
+  final String? reason;
 
   @override
   State<StartupFailure> createState() => _StartupFailureState();
@@ -144,9 +145,11 @@ class _StartupFailureState extends State<StartupFailure> {
       child: AppEmptyState(
         title: '暂时无法打开存储位置',
         icon: Icons.folder_off_outlined,
-        description: _failed
-            ? '仍无法访问存储位置，请检查磁盘连接和访问权限。原数据不会被重置。'
-            : '请连接原来的磁盘并检查访问权限。原数据不会被重置。',
+        description:
+            widget.reason ??
+            (_failed
+                ? '仍无法访问存储位置，请检查磁盘连接和访问权限。原数据不会被重置。'
+                : '请连接原来的磁盘并检查访问权限。原数据不会被重置。'),
         action: FilledButton(
           onPressed: _retrying ? null : _retry,
           child: Text(tr(context, _retrying ? '重试中…' : '重试')),

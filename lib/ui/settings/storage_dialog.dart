@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 
 import 'package:lanflow/core/inbox/inbox_controller.dart';
 import 'package:lanflow/core/network/models.dart';
+import 'package:lanflow/core/storage/storage_location.dart';
 import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_feedback.dart';
 import 'package:lanflow/ui/shared/app_panel.dart';
@@ -73,11 +74,7 @@ class _StorageDialogState extends State<StorageDialog> {
         final folder = await getDirectoryPath(
           confirmButtonText: tr(context, '选择文件夹'),
         );
-        if (folder != null) {
-          target = p.basename(folder).toLowerCase() == 'lanflow'
-              ? folder
-              : p.join(folder, 'LanFlow');
-        }
+        target = folder;
       }
       if (target == null || !mounted) return;
       final destination = target;
@@ -100,7 +97,7 @@ class _StorageDialogState extends State<StorageDialog> {
                 Text(
                   tr(
                     context,
-                    '在新位置重新开始：创建空白资料，旧位置的数据保留；为避免旧消息重新同步，其他设备需要重新绑定。',
+                    '使用新位置的数据：读取该位置已有的聊天记录、设置和设备绑定，原位置的数据保留；没有数据时先确认是否新建。',
                   ),
                 ),
               ],
@@ -113,7 +110,7 @@ class _StorageDialogState extends State<StorageDialog> {
             ),
             OutlinedButton(
               onPressed: () => Navigator.pop(context, false),
-              child: Text(tr(context, '在新位置重新开始')),
+              child: Text(tr(context, '使用新位置的数据')),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
@@ -127,7 +124,38 @@ class _StorageDialogState extends State<StorageDialog> {
         busy = true;
         error = null;
       });
-      await widget.inbox.relocateStorage!(destination, migrate);
+      var createIfEmpty = false;
+      if (!migrate &&
+          !await StorageLocation.containsData(Directory(destination))) {
+        if (!mounted) return;
+        createIfEmpty =
+            await showDialog<bool>(
+              context: context,
+              builder: (context) => AlertDialog(
+                title: Text(tr(context, '新位置没有数据')),
+                content: Text(
+                  tr(context, '该位置没有 LanFlow 数据，是否新建？原位置的数据保留，新资料需要重新绑定其他设备。'),
+                ),
+                actions: [
+                  TextButton(
+                    onPressed: () => Navigator.pop(context, false),
+                    child: Text(tr(context, '取消')),
+                  ),
+                  FilledButton(
+                    onPressed: () => Navigator.pop(context, true),
+                    child: Text(tr(context, '新建数据')),
+                  ),
+                ],
+              ),
+            ) ??
+            false;
+        if (!createIfEmpty || !mounted) return;
+      }
+      await widget.inbox.relocateStorage!(
+        destination,
+        migrate,
+        createIfEmpty: createIfEmpty,
+      );
     } on Object catch (e) {
       if (mounted) {
         setState(() => error = userError(e, fallback: '无法更改存储位置，请检查空间和权限'));

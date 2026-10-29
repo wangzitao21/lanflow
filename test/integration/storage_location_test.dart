@@ -132,6 +132,9 @@ void main() {
       await Directory('${source.path}/inbox').create(recursive: true);
       final database = File('${source.path}/inbox/messages.sqlite3');
       await database.writeAsString('original bytes');
+      await File(
+        '${source.path}/identity.json',
+      ).writeAsString('original identity');
       final location = StorageLocation(source);
       try {
         await expectLater(

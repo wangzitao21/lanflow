@@ -4,11 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:path/path.dart' as p;
 import 'package:path_provider/path_provider.dart';
 
-import 'core/storage/storage_location.dart';
+import 'core/storage/storage_startup.dart';
 import 'runtime.dart';
 import 'platform/platform_bridge.dart';
 import 'ui/shared/app_root.dart';
 import 'ui/shared/runtime_feedback.dart';
+import 'ui/shared/user_feedback.dart';
 
 Future<void> main() => launchLanFlow();
 
@@ -92,13 +93,12 @@ Future<void> launchLanFlow({
         }
         openingSession = recoverySession;
       }
-      final bootstrap = resolveBootstrap != null
-          ? await resolveBootstrap()
-          : override == null
-          ? await getApplicationSupportDirectory()
-          : Directory(override);
-      final location = StorageLocation(bootstrap);
-      final root = await location.resolve();
+      final storage = await StorageStartup.resolve(
+        resolveBootstrap: resolveBootstrap,
+      );
+      final location = storage.location;
+      final bootstrap = location.bootstrap;
+      final root = storage.root;
       if (recoverySession != null &&
           !p.equals(root.path, recoverySession!.lan.store.directory.path)) {
         throw const FileSystemException('请先恢复原存储位置以保留未保存的内容');
@@ -121,18 +121,23 @@ Future<void> launchLanFlow({
       openingSession = session;
       runApp(LanFlowHost(session: session, location: location));
       await (startSession?.call(session) ?? session.start());
+      if (!session.inbox.ready || !session.lan.ready) {
+        throw const FileSystemException('存储启动未完成');
+      }
+      await location.activate(root);
+      await location.confirm();
       if (recoverySession != null) {
-        if (!session.inbox.ready || !session.lan.ready) {
-          throw const FileSystemException('存储启动未完成');
-        }
         retired.add(recoverySession!);
         recoverySession = null;
       }
-    } on Object {
+    } on Object catch (error) {
       runApp(
         AppRoot(
           language: openingSession?.inbox.language.value ?? 'zh',
-          home: StartupFailure(onRetry: () => launching = launch()),
+          home: StartupFailure(
+            onRetry: () => launching = launch(),
+            reason: userError(error, fallback: '请连接原来的磁盘并检查访问权限。原数据不会被重置。'),
+          ),
         ),
       );
     } finally {

@@ -439,8 +439,12 @@ const _english = <String, String>{
       'Sending and receiving are paused. Resume to continue syncing.',
   '与已绑定设备自动同步消息和文件':
       'Automatically sync messages and files with paired devices',
-  '在新位置重新开始：创建空白资料，旧位置的数据保留；为避免旧消息重新同步，其他设备需要重新绑定。':
-      'Start fresh: create an empty profile and keep data at the old location. Pair other devices again to avoid syncing old messages back.',
+  '使用新位置的数据：读取该位置已有的聊天记录、设置和设备绑定，原位置的数据保留；没有数据时先确认是否新建。':
+      'Use the messages, settings and paired devices already at the new location. Keep the original data. Ask before creating data in an empty location.',
+  '新位置没有数据': 'No data at the new location',
+  '该位置没有 LanFlow 数据，是否新建？原位置的数据保留，新资料需要重新绑定其他设备。':
+      'This location has no LanFlow data. Create a new profile? Original data is preserved. Pair other devices again for the new profile.',
+  '新建数据': 'Create new data',
   '无法更改存储位置，请检查空间和权限':
       'Cannot change storage location. Check space and permissions.',
   'LanFlow 备份': 'LanFlow backup',
@@ -748,7 +752,7 @@ const _english = <String, String>{
   '迁移原数据：保留聊天记录、图片、文件、草稿和设备绑定，校验成功后移除旧副本。':
       'Move existing data: keep conversations, images, files, drafts and paired devices. Old copies are removed after verification.',
   '迁移原数据': 'Move existing data',
-  '在新位置重新开始': 'Start fresh at the new location',
+  '使用新位置的数据': 'Use data at the new location',
   '清理缓存': 'Clear cache',
   '缓存已清理': 'Cache cleared',
   '数据目录': 'Data folder',
@@ -775,11 +779,34 @@ const _english = <String, String>{
       'Using the new location. Some old files remain at the previous location.',
   '已在新位置重新开始。原数据保留，其他设备需要重新绑定。':
       'Started fresh at the new location. Original data is preserved. Pair your other devices again.',
+  '已切换到所选位置的数据，原位置的数据保留。':
+      'Using data at the selected location. Original data is preserved.',
   '数据已切换到新位置，后台接收服务暂未恢复，请重新打开应用。':
       'Using the new location. Reopen LanFlow to restart background receiving.',
   '位置切换未完成，已回到原位置，原数据保留。请检查磁盘空间和权限后重试。':
       'Location change did not finish. Original data is preserved at the previous location. Check disk space and permissions, then try again.',
   '暂时无法打开存储位置': 'Storage is unavailable',
+  '存储位置暂时不可用，请连接磁盘后重试':
+      'The storage location is unavailable. Connect the disk and retry.',
+  '启动路径与已保存的存储位置不同，请在设置中更改位置':
+      'The launch path differs from the saved location. Change the location in Settings.',
+  '原存储位置的数据缺失，请恢复原数据后重试':
+      'Data is missing from the saved location. Restore the original data and retry.',
+  '存储位置配置无法读取，请保留原数据':
+      'The saved storage location cannot be read. Keep the original data.',
+  '存储位置保存未完成，请恢复位置配置后重试':
+      'Saving the storage location was interrupted. Restore the location configuration and retry.',
+  '发现多个数据位置，请确认原存储位置，原数据均已保留':
+      'Multiple data locations were found. Confirm the original location. All data has been preserved.',
+  '所选位置的数据不完整，不能创建空白资料覆盖':
+      'The selected location contains incomplete data. It cannot be replaced with an empty profile.',
+  '新位置没有数据，请确认是否新建':
+      'There is no data at the new location. Confirm whether to create it.',
+  '数据文件无法读取，原文件已保留':
+      'Data files cannot be read. Original files have been preserved.',
+  '无法确定固定的配置目录，请检查用户配置':
+      'The fixed configuration directory is unavailable. Check your user configuration.',
+  '存储位置必须是完整的绝对路径': 'The storage location must be a full absolute path.',
   '仍无法访问存储位置，请检查磁盘连接和访问权限。原数据不会被重置。':
       'Storage is still unavailable. Check the disk connection and permissions. Your data will not be reset.',
   '请连接原来的磁盘并检查访问权限。原数据不会被重置。':
