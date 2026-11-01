@@ -40,14 +40,6 @@ class _ConversationListState extends State<ConversationList> {
     List<Conversation> conversations, {
     required IndexedWidgetBuilder itemBuilder,
   }) {
-    if (mobile) {
-      return ListView.builder(
-        key: const PageStorageKey('conversation-list-scroll'),
-        padding: EdgeInsets.zero,
-        itemCount: conversations.length,
-        itemBuilder: itemBuilder,
-      );
-    }
     return ReorderableListView.builder(
       key: const PageStorageKey('conversation-list-scroll'),
       padding: EdgeInsets.zero,
@@ -65,11 +57,20 @@ class _ConversationListState extends State<ConversationList> {
               ),
         );
       },
-      itemBuilder: (context, index) => ReorderableDragStartListener(
-        key: ValueKey('conversation-row-${conversations[index].id}'),
-        index: index,
-        child: itemBuilder(context, index),
-      ),
+      itemBuilder: (context, index) => mobile
+          ? ReorderableDelayedDragStartListener(
+              key: ValueKey('conversation-row-${conversations[index].id}'),
+              index: index,
+              enabled:
+                  inbox.store.preference(conversations[index].id).pinnedAt ==
+                  null,
+              child: itemBuilder(context, index),
+            )
+          : ReorderableDragStartListener(
+              key: ValueKey('conversation-row-${conversations[index].id}'),
+              index: index,
+              child: itemBuilder(context, index),
+            ),
     );
   }
 
@@ -143,6 +144,7 @@ class _ConversationListState extends State<ConversationList> {
                     onMenu(conversation.id, details.globalPosition),
                   ),
                   child: MessageHold(
+                    enabled: !mobile,
                     onHold: (position, anchor) => unawaited(
                       onMenu(conversation.id, position, anchor: anchor),
                     ),
@@ -306,6 +308,36 @@ class _ConversationListState extends State<ConversationList> {
                                         ],
                                       ),
                                     ),
+                                    if (mobile)
+                                      Builder(
+                                        builder: (buttonContext) => IconButton(
+                                          key: ValueKey(
+                                            'conversation-menu-${conversation.id}',
+                                          ),
+                                          tooltip: tr(context, '会话操作'),
+                                          icon: Icon(
+                                            Icons.more_horiz,
+                                            size: 20,
+                                            color: palette.muted,
+                                          ),
+                                          onPressed: () {
+                                            final box =
+                                                buttonContext
+                                                        .findRenderObject()!
+                                                    as RenderBox;
+                                            final anchor =
+                                                box.localToGlobal(Offset.zero) &
+                                                box.size;
+                                            unawaited(
+                                              onMenu(
+                                                conversation.id,
+                                                anchor.center,
+                                                anchor: anchor,
+                                              ),
+                                            );
+                                          },
+                                        ),
+                                      ),
                                   ],
                                 ),
                               ),

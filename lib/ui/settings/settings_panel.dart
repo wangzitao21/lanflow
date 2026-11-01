@@ -60,6 +60,7 @@ class _SettingsPanelState extends State<SettingsPanel> {
   bool _picking = false;
   bool _changingAppearance = false;
   bool _changingLanguage = false;
+  bool _changingMessages = false;
   String? _error;
   InboxController get inbox => widget.inbox;
   bool get _canBack => _pages.length > 1;
@@ -402,6 +403,26 @@ class _SettingsPanelState extends State<SettingsPanel> {
     );
   }
 
+  Future<void> _messagePreferences({bool? numbered, bool? cut}) async {
+    if (_changingMessages) return;
+    setState(() {
+      _changingMessages = true;
+      _error = null;
+    });
+    try {
+      await inbox.setMessagePreferences(
+        mergedCopyNumbered: numbered,
+        cutForward: cut,
+      );
+    } on Object catch (error) {
+      if (mounted) {
+        setState(() => _error = userError(error, fallback: '设置未保存，请重试'));
+      }
+    } finally {
+      if (mounted) setState(() => _changingMessages = false);
+    }
+  }
+
   Widget _preferences() {
     return ListView(
       key: const PageStorageKey('preferences-form'),
@@ -484,6 +505,30 @@ class _SettingsPanelState extends State<SettingsPanel> {
         Text(
           tr(context, '切换后立即生效'),
           style: Theme.of(context).textTheme.bodySmall,
+        ),
+        const Divider(height: 32),
+        Text(
+          tr(context, '消息操作'),
+          style: Theme.of(context).textTheme.titleMedium,
+        ),
+        SwitchListTile.adaptive(
+          key: const ValueKey('merged-copy-numbered'),
+          contentPadding: EdgeInsets.zero,
+          title: Text(tr(context, '合并复制时添加序号')),
+          value: inbox.store.mergedCopyNumbered,
+          onChanged: _changingMessages || !inbox.ready
+              ? null
+              : (value) => _messagePreferences(numbered: value),
+        ),
+        SwitchListTile.adaptive(
+          key: const ValueKey('cut-forward'),
+          contentPadding: EdgeInsets.zero,
+          title: Text(tr(context, '剪切式转发')),
+          subtitle: Text(tr(context, '成功转发后，原消息移至回收站')),
+          value: inbox.store.cutForward,
+          onChanged: _changingMessages || !inbox.ready
+              ? null
+              : (value) => _messagePreferences(cut: value),
         ),
         const Divider(height: 32),
         Text(tr(context, '收藏'), style: Theme.of(context).textTheme.titleMedium),

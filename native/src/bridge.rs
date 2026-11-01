@@ -166,13 +166,9 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         "history_position" => history::position(&db, &id(&request,"id")?),
         "history_ids" => Ok(json!(history::conversation_ids(&db, &id(&request,"conversationId")?)?)),
         "history_unread" => history::unread(&db,&request),
-        "delete_conversation" => {
+        "delete_conversation" | "clear_conversation" => {
             let conversation = id(&request,"conversationId")?;
-            let maximum: i64 = db.query_row("SELECT COALESCE(MAX(sequence),0) FROM items WHERE COALESCE(json_extract(body,'$.conversationId'),'lanflow-self-chat')=?", [&conversation], |r| r.get(0))?;
-            let ids = history::conversation_ids(&db,&conversation)?;
-            for chunk in ids.chunks(100_000) {
-                events::delete_many(root,&mut db,&json!(chunk))?;
-            }
+            let maximum = events::delete_conversation(root, &mut db, &conversation, op=="delete_conversation")?;
             let mut state = snapshot_since(&db,request["knownRevision"].as_i64())?;
             state["through"] = json!(maximum);
             Ok(state)
@@ -223,6 +219,9 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
             Ok(Value::Object(draft_paths))
         }
         "add" => {
+            if request["source"].is_null() && conversation_recovery::closed(&db,request["item"]["conversationId"].as_str().unwrap_or("lanflow-self-chat"))? {
+                return Err("会话已删除，请选择其他会话发送".into());
+            }
             apply(
                 root,
                 &mut db,
@@ -234,6 +233,10 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         "delete" => {
             let target = id(&request, "id")?;
             events::delete_many(root,&mut db,&json!([target]))?;
+            snapshot_since(&db, request["knownRevision"].as_i64())
+        }
+        "forward_message" => {
+            events::forward_message(root, &mut db, &request)?;
             snapshot_since(&db, request["knownRevision"].as_i64())
         }
         "edit_message" => {
@@ -248,6 +251,13 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
         }
         "trash" => maintenance::trash(root, &db),
         "trash_page" => maintenance::trash_page(root, &db, &request),
+        "recovery_page" => conversation_recovery::page(root,&db,&request),
+        "recover_message" => {
+            let destination=conversation_recovery::restore(root,&mut db,&request)?;
+            let mut state=snapshot_since(&db,request["knownRevision"].as_i64())?;
+            state["restoredConversationId"]=json!(destination);
+            Ok(state)
+        }
         "set_favorites" => {
             events::set_favorites(root, &mut db, &request["ids"], request["value"].as_bool().ok_or("Invalid favorite state")?)?;
             snapshot_since(&db, request["knownRevision"].as_i64())
@@ -268,7 +278,7 @@ pub(super) fn dispatch(request: Value) -> Result<Value> {
             if request["source"] == "favorite" {
                 favorites::restore(root,&mut db,&json!([id(&request,"id")?]))?;
             } else {
-                maintenance::restore(root, &mut db, &id(&request, "id")?)?;
+                maintenance::restore(root, &mut db, &id(&request, "id")?, request["conversationId"].as_str())?;
             }
             snapshot_since(&db, request["knownRevision"].as_i64())
         }

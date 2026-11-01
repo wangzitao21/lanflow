@@ -47,7 +47,7 @@ void main() {
         reason: 'Explicit unread marks remain until reopening',
       );
       await pc.inbox.setConversationPinned(work.id, true);
-      await pc.inbox.setConversationAvatar(work.id, 'book', color:0xFFDCE7F3);
+      await pc.inbox.setConversationAvatar(work.id, 'book', color: 0xFFDCE7F3);
       expect(pc.inbox.conversations.first.id, work.id);
       await pc.close();
       pc.inbox.dispose();
@@ -62,7 +62,11 @@ void main() {
       expect(pc.inbox.conversations.any((item) => item.id == work.id), isFalse);
       expect(await pc.inbox.store.recentlyDeleted(), isNotEmpty);
       await pc.inbox.restoreItem(first.item);
-      expect(pc.inbox.conversations.any((item) => item.id == work.id), isTrue);
+      expect(pc.inbox.conversations.any((item) => item.id == work.id), isFalse);
+      expect(
+        pc.inbox.conversations.any((item) => item.name == '工作（恢复）'),
+        isTrue,
+      );
       expect(
         pc.inbox.conversations.any((item) => item.id == defaultConversationId),
         isTrue,

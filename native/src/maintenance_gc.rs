@@ -9,7 +9,7 @@ fn add_digest(item: &Value, referenced: &mut HashSet<String>) {
 
 fn references(db: &Connection) -> Result<HashSet<String>> {
     let mut referenced = HashSet::new();
-    for table in ["items", "trash", "favorite_trash"] {
+    for table in ["items", "trash", "favorite_trash", "conversation_recovery"] {
         let mut statement = db.prepare(&format!("SELECT body FROM {table}"))?;
         for body in statement.query_map([], |row| row.get::<_, String>(0))? {
             add_digest(&serde_json::from_str::<Value>(&body?)?, &mut referenced);
@@ -169,6 +169,7 @@ pub(super) fn cleanup(root: &Path, clear_trash: bool) -> Result<Value> {
         0
     };
     let tx = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let compacted_events=event_compaction::all(&tx)?;
     let referenced = references(&tx)?;
     let candidates = tx
         .prepare("SELECT digest,path FROM attachment_files")?
@@ -271,9 +272,10 @@ pub(super) fn cleanup(root: &Path, clear_trash: bool) -> Result<Value> {
         }
     }
     tx.commit()?;
+    db.execute_batch("PRAGMA wal_checkpoint(TRUNCATE); VACUUM; PRAGMA wal_checkpoint(TRUNCATE);")?;
     Ok(
         json!({"releasedBytes":released_bytes,"removedFiles":removed_files,
-        "keptFiles":kept_files,"clearedTrash":cleared_trash}),
+        "keptFiles":kept_files,"clearedTrash":cleared_trash,"compactedEvents":compacted_events}),
     )
 }
 
@@ -456,7 +458,7 @@ mod tests {
             0
         );
         assert_eq!(
-            db.query_row("SELECT count(*) FROM events", [], |row| row
+            db.query_row("SELECT (SELECT count(*) FROM events)+(SELECT count(*) FROM compacted_events)", [], |row| row
                 .get::<_, i64>(0))
                 .unwrap(),
             5

@@ -74,6 +74,7 @@ fn canonical<'a>(event: &'a str, favorite: &'a Value) -> &'a str {
 fn insert_event(db: &Connection, event: &Value) -> Result<()> {
     let encoded = serde_json::to_string(event)?;
     let event_id = id(event, "id")?;
+    if event_compaction::replay(db,&event_id,&encoded)? { return Ok(()); }
     let previous: Option<String> = db
         .query_row("SELECT body FROM events WHERE id=?", [&event_id], |r| {
             r.get(0)
@@ -202,6 +203,9 @@ pub(super) fn for_client(db: &Connection, mut body: Value) -> Result<Value> {
     if deleted(db, &original)? {
         body["value"] = json!(false);
     }
+    if db.query_row("SELECT EXISTS(SELECT 1 FROM conversation_recovery WHERE id=?)",[&original],|r|r.get::<_,bool>(0))? {
+        body["value"]=json!(false);
+    }
     let current: Option<String> = db
         .query_row("SELECT body FROM items WHERE id=?", [&original], |r| {
             r.get(0)
@@ -315,6 +319,16 @@ pub(super) fn remove_original(db: &Connection, original: &str) -> Result<()> {
     )
 }
 
+pub(super) fn compact_deleted(db: &Connection, original: &str) -> Result<()> {
+    let Some((event, body))=state(db,original)? else { return Ok(()); };
+    let retained=db.query_row("SELECT EXISTS(SELECT 1 FROM events WHERE id=?)",[event],|r|r.get::<_,bool>(0))?;
+    if body["item"].is_object() || !retained {
+        db.execute("UPDATE favorites SET body=json_remove(body,'$.item') WHERE id=?",[original])?;
+        emit(db,original,false,None,None)?;
+    }
+    Ok(())
+}
+
 pub(super) fn set(_root: &Path, db: &mut Connection, ids: &Value, value: bool) -> Result<()> {
     let ids = selected(ids)?;
     let tx = db.transaction()?;
@@ -422,6 +436,10 @@ pub(super) fn restore(root: &Path, db: &mut Connection, ids: &Value) -> Result<(
                     .transpose()?
                     .unwrap_or_else(|| item.clone());
                 canonical["id"] = json!(restored);
+                let owner=canonical["conversationId"].as_str().unwrap_or("lanflow-self-chat");
+                if conversation_recovery::closed(&tx,owner)? {
+                    canonical["conversationId"]=json!(conversation_recovery::destination(root,&tx,owner,None)?);
+                }
                 canonical = events::normalize_item(&canonical)?;
                 events::apply_transaction(root, &tx, &item_event(&canonical), None)?;
                 canonical

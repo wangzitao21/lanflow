@@ -179,11 +179,13 @@ class MessageSelectionBar extends StatelessWidget {
     required this.onDelete,
     required this.onExport,
     required this.onFavorite,
+    this.onCopy,
     this.compact = false,
     this.panel = false,
   });
   final MessageSelection selection;
   final VoidCallback onAll, onDelete, onExport, onFavorite;
+  final VoidCallback? onCopy;
   final bool compact;
   final bool panel;
 
@@ -202,6 +204,12 @@ class MessageSelectionBar extends StatelessWidget {
       TextButton(
         onPressed: selection.busy ? null : selection.clear,
         child: Text(tr(context, '取消多选')),
+      ),
+      TextButton.icon(
+        key: const ValueKey('copy-selected-messages'),
+        onPressed: selection.busy || selection.ids.isEmpty ? null : onCopy,
+        icon: const Icon(Icons.copy_all_outlined, size: 18),
+        label: Text(tr(context, '合并复制')),
       ),
       TextButton.icon(
         onPressed: selection.busy || selection.ids.isEmpty ? null : onFavorite,
@@ -341,6 +349,12 @@ class MessageSelectionBar extends StatelessWidget {
                                 '全选',
                                 Icons.done_all,
                                 selection.busy ? null : onAll,
+                              ),
+                              action(
+                                'copy',
+                                '合并复制',
+                                Icons.copy_all_outlined,
+                                enabled ? onCopy : null,
                               ),
                               action(
                                 'favorite',

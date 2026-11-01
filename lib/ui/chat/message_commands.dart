@@ -1,6 +1,49 @@
 part of 'home_page.dart';
 
 extension _MessageCommands on _HomePageState {
+  Future<void> _copySelection() async {
+    if (_selection.busy || _selection.ids.isEmpty) return;
+    _selection.setBusy(true);
+    try {
+      final entries = await inbox.store.loadEntries(_selection.ids.toList());
+      if (entries.isEmpty) return;
+      await Clipboard.setData(
+        ClipboardData(
+          text: mergedMessageText(
+            entries,
+            numbered: inbox.store.mergedCopyNumbered,
+          ),
+        ),
+      );
+      _toast('已合并复制');
+    } on Object catch (error) {
+      _toast(userError(error, fallback: '复制失败，请重试'));
+    } finally {
+      if (mounted) _selection.setBusy(false);
+    }
+  }
+
+  Future<void> _forwardMessage(InboxItem item) async {
+    final moved = await _dialog<bool>(
+      context: context,
+      builder: (_) => ForwardMessageDialog(inbox: inbox, item: item),
+    );
+    if (!mounted || moved == null) return;
+    final viewer = _viewerRoute;
+    if (moved && viewer != null && viewer.isCurrent) Navigator.pop(context);
+    _toast('已转发');
+  }
+
+  Future<void> _copyImage(InboxItem item) async {
+    try {
+      final file = await inbox.store.fileForExport(item);
+      await PlatformBridge.copyImage(file.path);
+      _toast('已复制图片');
+    } on Object catch (error) {
+      _toast(userError(error, fallback: '复制图片失败，请重试'));
+    }
+  }
+
   void _selectionChanged() {
     if (mounted) _rebuild(() {});
     _updateReading();

@@ -215,6 +215,11 @@ fn project(db: &Connection, target: &str) -> Result<()> {
         )?;
         favorites::source_changed(db,target)?;
     }
+    let recovery: Option<String> = db.query_row("SELECT body FROM conversation_recovery WHERE id=?",[target],|r|r.get(0)).optional()?;
+    if let Some(body) = recovery {
+        let updated=edited_item(db,&serde_json::from_str(&body)?)?;
+        db.execute("UPDATE conversation_recovery SET body=? WHERE id=?",params![updated.to_string(),target])?;
+    }
     Ok(())
 }
 

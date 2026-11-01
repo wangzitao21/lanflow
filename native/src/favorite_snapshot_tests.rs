@@ -66,6 +66,11 @@ fn legacy_favorites_migrate_from_live_trash_or_event_only_without_duplicate_snap
             let db = shared.lock().unwrap();
             if source == "event" {
                 db.execute("DELETE FROM trash", []).unwrap();
+                // Reconstruct a deployed pre-compaction database, whose only
+                // remaining copy of the source lived in its historical event.
+                let original=item_event(&item);
+                db.execute("DELETE FROM compacted_events WHERE id=?",[original["id"].as_str().unwrap()]).unwrap();
+                db.execute("INSERT INTO events(id,body) VALUES(?,?)",params![original["id"].as_str().unwrap(),original.to_string()]).unwrap();
             }
             db.execute(
                 "INSERT INTO events(id,body) VALUES(?,?)",

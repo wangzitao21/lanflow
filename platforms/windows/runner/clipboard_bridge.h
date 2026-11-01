@@ -1,6 +1,7 @@
 #ifndef RUNNER_CLIPBOARD_BRIDGE_H_
 #define RUNNER_CLIPBOARD_BRIDGE_H_
 #include <windows.h>
+#include <shellapi.h>
 #include <optional>
 #include <vector>
 #include <cstdint>
@@ -23,6 +24,10 @@ ClipboardSnapshot SnapshotBitmap(HBITMAP bitmap);
 std::optional<ClipboardSnapshot> ReadClipboardSnapshot(HWND window);
 std::optional<std::vector<uint8_t>> EncodeClipboardSnapshot(std::optional<ClipboardSnapshot> snapshot);
 std::optional<std::vector<uint8_t>> ReadClipboardPng(HWND window);
+std::vector<std::string> ReadFileDrop(HDROP drop);
+std::vector<std::string> ReadClipboardFiles(HWND window);
+void WriteClipboardImage(HWND window, const std::vector<uint8_t>& png,
+                         const std::vector<uint8_t>& rgba, int width, int height);
 
 // Snapshot ownership crosses the worker boundary; Flutter callbacks never do.
 class AsyncClipboard {

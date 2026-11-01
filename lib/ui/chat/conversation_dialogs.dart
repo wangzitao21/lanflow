@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'conversation_avatar.dart';
 import 'package:lanflow/ui/shared/app_panel.dart';
 import 'package:lanflow/core/inbox/inbox_controller.dart';
+import 'package:lanflow/core/inbox/inbox_models.dart';
 import 'package:lanflow/ui/shared/app_dialogs.dart';
 import 'package:lanflow/ui/shared/app_feedback.dart';
 import 'package:lanflow/ui/shared/chat_theme.dart';
@@ -223,17 +224,28 @@ class ConversationDialogs {
     }
   }
 
-  Future<void> delete(BuildContext context, String id) async {
+  Future<void> delete(
+    BuildContext context,
+    String id, {
+    bool clearOnly = false,
+  }) async {
+    final clear = clearOnly || id == defaultConversationId;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (_) => AppConfirmDialog(
-        title: '删除会话',
-        confirmLabel: '删除',
-        message: inbox.linkFavoriteDeletion
-            ? '会话中的消息及对应收藏将移至回收站，已绑定设备会同步这些更改。'
-            : '会话中的消息将移至回收站，收藏不受影响。已绑定设备会同步删除这些消息。',
+        title: clear ? '清空消息' : '删除会话',
+        confirmLabel: clear ? '清空' : '删除',
+        message: clear
+            ? '已有消息及对应收藏将移至回收站。会话保留，可继续接收新消息。'
+            : '会话和已有消息将在已绑定设备上删除。之后收到的离线新消息会保存在待恢复内容中。',
       ),
     );
-    if (confirmed == true) await inbox.deleteConversation(id);
+    if (confirmed == true) {
+      if (clear) {
+        await inbox.clearConversation(id);
+      } else {
+        await inbox.deleteConversation(id);
+      }
+    }
   }
 }

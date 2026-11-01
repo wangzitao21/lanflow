@@ -7,6 +7,9 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:lanflow/core/files/message_export.dart';
+import 'package:lanflow/core/files/message_copy.dart';
+import 'forward_message_dialog.dart';
+import 'package:lanflow/ui/settings/conversation_recovery_panel.dart';
 import 'package:lanflow/core/storage/storage_layout.dart';
 
 import 'package:lanflow/core/inbox/inbox_controller.dart';
@@ -889,6 +892,16 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     final original = _composer.value;
     setState(() => _addingAttachments = true);
     try {
+      final files = await PlatformBridge.readClipboardFiles();
+      if (files.isNotEmpty) {
+        for (final path in files) {
+          await inbox.stageFile(path, conversation: conversation);
+        }
+        if (mounted && inbox.conversationId == conversation) {
+          _focus.requestFocus();
+        }
+        return;
+      }
       final image = await PlatformBridge.readClipboardImage();
       if (image != null) {
         await inbox.pasteImage(image, conversation: conversation);
@@ -988,6 +1001,8 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       preserveSelection: selection?.isNotEmpty == true,
       actions: [
         if (item.isFile) ...[
+          if (item.kind == MessageKind.image)
+            const MessageAction('copyImage', '复制图片', Icons.copy_outlined),
           MessageAction('open', '打开', Icons.open_in_new_outlined),
           MessageAction('folder', '在文件夹中显示', Icons.folder_open_outlined),
           MessageAction('save', '另存为', Icons.save_alt_outlined),
@@ -1007,6 +1022,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             ),
         ],
         const MessageAction('quote', '引用', Icons.format_quote_rounded),
+        const MessageAction('forward', '转发', Icons.forward_outlined),
         const MessageAction('edit', '修改', Icons.edit_outlined),
         if (lan.identityReady && item.originId == lan.identity.id)
           const MessageAction('details', '同步详情', Icons.info_outline_rounded),
@@ -1023,6 +1039,14 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     // Dismissal is deliberately passive: the click that dismissed this menu
     // may have already focused the editor or opened another message's menu.
     if (!mounted || action == null) return;
+    if (action == 'copyImage') {
+      await _copyImage(item);
+      return;
+    }
+    if (action == 'forward') {
+      await _forwardMessage(item);
+      return;
+    }
     if (action == 'edit') {
       try {
         await _saveMessageEdit();
@@ -1638,9 +1662,15 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
               ),
               const MessageAction('rename', '重命名', Icons.edit_outlined),
               const MessageAction('avatar', '更换头像', Icons.face_outlined),
-              const MessageAction(
+              if (id != defaultConversationId)
+                const MessageAction(
+                  'clearConversation',
+                  '清空消息',
+                  Icons.clear_all,
+                ),
+              MessageAction(
                 'deleteConversation',
-                '删除',
+                id == defaultConversationId ? '清空消息' : '删除',
                 Icons.delete_outline,
                 destructive: true,
               ),
@@ -1667,6 +1697,9 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
       }
       if (action == 'deleteConversation') {
         if (mounted) await _conversationDialogs.delete(context, id);
+      }
+      if (action == 'clearConversation' && mounted) {
+        await _conversationDialogs.delete(context, id, clearOnly: true);
       }
     } on Object catch (error) {
       _toast(userError(error, fallback: '会话设置保存失败，请重试'));
@@ -1757,6 +1790,7 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
             onDelete: _deleteSelection,
             onFavorite: () => _favoriteMessages(_selection.ids.toList(), true),
             onExport: _exportSelection,
+            onCopy: _copySelection,
           )
         : null,
   );
@@ -1802,6 +1836,18 @@ class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
     mainAxisSize: MainAxisSize.min,
     children: [
       const ShareImportNotice(),
+      if (inbox.recoveryCount > 0)
+        TextButton.icon(
+          key: const ValueKey('open-pending-recovery'),
+          onPressed: () => showDialog<void>(
+            context: context,
+            builder: (_) => ConversationRecoveryPanel(inbox: inbox),
+          ),
+          icon: const Icon(Icons.restore_outlined),
+          label: Text(
+            tr(context, '有 {count} 条待恢复内容', {'count': inbox.recoveryCount}),
+          ),
+        ),
       SyncAttentionNotice(inbox: inbox, onOpen: _syncProblems),
     ],
   );

@@ -1,6 +1,7 @@
 #include "flutter_window.h"
 
 #include <optional>
+#include <stdexcept>
 #include <flutter/method_channel.h>
 #include <flutter/standard_method_codec.h>
 #include <flutter/method_result_functions.h>
@@ -216,6 +217,29 @@ bool FlutterWindow::InitializeFlutter() {
       &flutter::StandardMethodCodec::GetInstance());
   clipboard_reader_ = std::make_unique<AsyncClipboard>(GetHandle());
   clipboard_channel_->SetMethodCallHandler([this](const auto& call, auto result) {
+    if (call.method_name() == "readFiles") {
+      try {
+        flutter::EncodableList paths;
+        for (auto& path : ReadClipboardFiles(GetHandle())) {
+          paths.emplace_back(std::move(path));
+        }
+        result->Success(flutter::EncodableValue(std::move(paths)));
+      } catch (const std::exception& error) { result->Error("CLIPBOARD", error.what()); }
+      return;
+    }
+    if (call.method_name() == "writeImage") {
+      try {
+        const auto args = call.arguments() ? std::get_if<flutter::EncodableMap>(call.arguments()) : nullptr;
+        if (!args) throw std::runtime_error("Missing clipboard image");
+        const auto& png = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("png")));
+        const auto& rgba = std::get<std::vector<uint8_t>>(args->at(flutter::EncodableValue("rgba")));
+        const auto width = std::get<int32_t>(args->at(flutter::EncodableValue("width")));
+        const auto height = std::get<int32_t>(args->at(flutter::EncodableValue("height")));
+        WriteClipboardImage(GetHandle(), png, rgba, width, height);
+        result->Success();
+      } catch (const std::exception& error) { result->Error("CLIPBOARD", error.what()); }
+      return;
+    }
     if (call.method_name() != "readImage") { result->NotImplemented(); return; }
     auto reply = std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>>(std::move(result));
     try {

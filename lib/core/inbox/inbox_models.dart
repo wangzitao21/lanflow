@@ -140,12 +140,14 @@ class Conversation {
     this.avatar,
     this.avatarColor,
     this.appearanceConfigured = false,
+    this.deleted = false,
   });
   final String id;
   final String name;
   final String? avatar;
   final int? avatarColor;
   final bool appearanceConfigured;
+  final bool deleted;
   factory Conversation.fromJson(String id, Map value) => Conversation(
     id,
     value['name'] as String,
@@ -153,6 +155,7 @@ class Conversation {
     avatarColor: value['avatarColor'] as int?,
     appearanceConfigured:
         value.containsKey('avatar') || value.containsKey('avatarColor'),
+    deleted: value['deleted'] == true,
   );
 }
 
@@ -435,4 +438,18 @@ class DeletedItem {
   bool get isFavorite => source == 'favorite';
   final DateTime deletedAt;
   final bool available;
+}
+
+class RecoveryItem {
+  RecoveryItem.fromJson(Map value)
+    : item = InboxItem.fromJson(
+        Map<String, dynamic>.from(value['item'] as Map),
+      ),
+      conversationName = value['conversationName'] as String? ?? '已删除会话',
+      available = value['available'] == true,
+      versions = value['versions'] as int? ?? 1;
+  final InboxItem item;
+  final String conversationName;
+  final bool available;
+  final int versions;
 }

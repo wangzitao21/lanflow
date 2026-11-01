@@ -2,8 +2,14 @@ mod attachments;
 mod backup;
 mod blobs;
 mod bridge;
+mod conversation_recovery;
+mod event_compaction;
 mod errors;
 mod events;
+#[cfg(test)]
+mod conversation_deletion_tests;
+#[cfg(test)]
+mod conversation_lifecycle_tests;
 mod favorites;
 mod history;
 #[cfg(feature = "hub")]
@@ -116,6 +122,8 @@ mod bootstrap_tests;
 mod favorite_snapshot_tests;
 #[cfg(test)]
 mod message_edit_tests;
+#[cfg(test)]
+mod message_forward_tests;
 #[cfg(test)]
 mod optimization_tests;
 #[cfg(test)]

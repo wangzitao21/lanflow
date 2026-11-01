@@ -369,7 +369,11 @@ class _FavoritesPanelState extends State<FavoritesPanel> {
         MessageAction('pin', pinned ? '取消置顶' : '置顶', Icons.push_pin_outlined),
         MessageAction(
           'copy',
-          entry.item.isFile ? '复制文件名' : '复制文字',
+          entry.item.kind == MessageKind.image
+              ? '复制图片'
+              : entry.item.isFile
+              ? '复制文件名'
+              : '复制文字',
           Icons.content_copy_outlined,
         ),
         if (entry.item.isFile)

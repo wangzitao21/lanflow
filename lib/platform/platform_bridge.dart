@@ -1,5 +1,7 @@
 import 'dart:io';
+import 'dart:ui' as ui;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 
@@ -101,8 +103,55 @@ class PlatformBridge {
   }
 
   static Future<Uint8List?> readClipboardImage() async {
-    if (!Platform.isWindows) return null;
+    if (defaultTargetPlatform != TargetPlatform.windows) return null;
     return _clipboard.invokeMethod<Uint8List>('readImage');
+  }
+
+  static Future<List<String>> readClipboardFiles() async {
+    if (defaultTargetPlatform != TargetPlatform.windows) return const [];
+    return await _clipboard.invokeListMethod<String>('readFiles') ?? const [];
+  }
+
+  static Future<void> copyImage(String path) async {
+    final buffer = await ui.ImmutableBuffer.fromFilePath(path);
+    ui.ImageDescriptor? descriptor;
+    ui.Codec? codec;
+    ui.Image? image;
+    try {
+      descriptor = await ui.ImageDescriptor.encoded(buffer);
+      if (descriptor.width * descriptor.height > 16 * 1024 * 1024) {
+        throw const FormatException('图片过大，请另存后复制');
+      }
+      codec = await descriptor.instantiateCodec();
+      image = (await codec.getNextFrame()).image;
+      final png = await image.toByteData(format: ui.ImageByteFormat.png);
+      if (png == null) throw const FormatException('无法读取图片');
+      if (Platform.isWindows) {
+        final rgba = await image.toByteData(
+          format: ui.ImageByteFormat.rawStraightRgba,
+        );
+        if (rgba == null) throw const FormatException('无法读取图片');
+        await _clipboard.invokeMethod<void>('writeImage', {
+          'png': png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+          'rgba': rgba.buffer.asUint8List(
+            rgba.offsetInBytes,
+            rgba.lengthInBytes,
+          ),
+          'width': image.width,
+          'height': image.height,
+        });
+      } else {
+        await _channel.invokeMethod<void>(
+          'copyImage',
+          png.buffer.asUint8List(png.offsetInBytes, png.lengthInBytes),
+        );
+      }
+    } finally {
+      image?.dispose();
+      codec?.dispose();
+      descriptor?.dispose();
+      buffer.dispose();
+    }
   }
 
   static Future<void> Function(Map<String, dynamic>)? _onShare;

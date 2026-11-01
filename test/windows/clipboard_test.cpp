@@ -1,15 +1,53 @@
 #include "../../platforms/windows/runner/clipboard_bridge.h"
 #include <wincodec.h>
+#include <shlobj.h>
 #include <wrl/client.h>
 #include <iostream>
 #include <stdexcept>
 #include <chrono>
 #include <future>
 #include <thread>
+#include <cstring>
 
 using Microsoft::WRL::ComPtr;
 void Check(HRESULT hr) {
   if (FAILED(hr)) throw std::runtime_error("WIC test operation failed");
+}
+
+void TestFileDrop() {
+  const std::wstring first = L"C:\\Photos\\\u65c5\u884c \u7167\u7247 \U0001F308.jpg";
+  const std::wstring second = L"C:\\" + std::wstring(280, L'a') + L"\\second.png";
+  const auto bytes = sizeof(DROPFILES) + (first.size() + second.size() + 3) * sizeof(wchar_t);
+  auto memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+  if (!memory) throw std::runtime_error("Cannot allocate file-drop fixture");
+  auto drop = static_cast<DROPFILES*>(GlobalLock(memory));
+  if (!drop) throw std::runtime_error("Cannot lock file-drop fixture");
+  drop->pFiles = sizeof(DROPFILES);
+  drop->fWide = TRUE;
+  auto paths = reinterpret_cast<wchar_t*>(drop + 1);
+  std::memcpy(paths, first.c_str(), (first.size() + 1) * sizeof(wchar_t));
+  std::memcpy(paths + first.size() + 1, second.c_str(), (second.size() + 1) * sizeof(wchar_t));
+  GlobalUnlock(memory);
+  const auto copied = ReadFileDrop(static_cast<HDROP>(memory));
+  GlobalFree(memory);
+  const std::vector<std::string> expected = {
+    u8"C:\\Photos\\\u65c5\u884c \u7167\u7247 \U0001F308.jpg",
+    "C:\\" + std::string(280, 'a') + "\\second.png",
+  };
+  if (copied != expected) throw std::runtime_error("File-drop paths, Unicode or long names changed");
+
+  const char legacy[] = "C:\\Photos\\legacy.jpg\0C:\\Photos\\other.png\0";
+  memory = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, sizeof(DROPFILES) + sizeof(legacy));
+  drop = static_cast<DROPFILES*>(GlobalLock(memory));
+  if (!drop) throw std::runtime_error("Cannot allocate ANSI file-drop fixture");
+  drop->pFiles = sizeof(DROPFILES);
+  std::memcpy(drop + 1, legacy, sizeof(legacy));
+  GlobalUnlock(memory);
+  const auto ansi = ReadFileDrop(static_cast<HDROP>(memory));
+  GlobalFree(memory);
+  if (ansi != std::vector<std::string>{"C:\\Photos\\legacy.jpg", "C:\\Photos\\other.png"}) {
+    throw std::runtime_error("ANSI file-drop paths changed");
+  }
 }
 
 void TestAsyncLifecycle() {
@@ -113,6 +151,8 @@ int main() {
     std::cout << "Native screenshot-to-PNG dimensions, orientation and colors passed\n";
     TestAsyncLifecycle();
     std::cout << "Clipboard background encoding and shutdown lifecycle passed\n";
+    TestFileDrop();
+    std::cout << "Explorer file-list Unicode, multiple files and long paths passed\n";
   } catch (const std::exception& error) {
     std::cerr << error.what() << '\n';
     CoUninitialize();

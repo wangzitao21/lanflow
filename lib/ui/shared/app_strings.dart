@@ -80,6 +80,27 @@ class _TranslationTemplate {
 }
 
 const _english = <String, String>{
+  '合并复制': 'Copy together',
+  '已合并复制': 'Messages copied',
+  '合并复制时添加序号': 'Number messages when copying together',
+  '消息操作': 'Message actions',
+  '剪切式转发': 'Move when forwarding',
+  '成功转发后，原消息移至回收站':
+      'Move the original to the recycle bin after forwarding succeeds',
+  '转发后保留原消息': 'Keep the original message after forwarding',
+  '转发': 'Forward',
+  '已转发': 'Forwarded',
+  '转发到其他会话': 'Forward to another conversation',
+  '没有可转发的会话': 'No matching conversations',
+  '转发失败，原消息已保留': 'Could not forward. The original message was kept.',
+  '消息已删除，无法转发': 'This message was deleted and cannot be forwarded.',
+  '请选择其他会话': 'Choose another conversation',
+  '目标会话不存在': 'The destination conversation no longer exists',
+  '已复制图片': 'Image copied',
+  '复制图片失败，请重试': 'Could not copy the image. Try again.',
+  '图片过大，请另存后复制': 'This image is too large. Save it before copying.',
+  '无法读取图片': 'Could not read the image',
+  '会话操作': 'Conversation actions',
   '同步未完成': 'Sync incomplete',
   '会话顺序未保存，请重试': 'Conversation order could not be saved. Try again.',
   '消息已删除': 'Message deleted',
@@ -876,4 +897,34 @@ const _english = <String, String>{
   '移除未完成，请重试': 'Removal did not finish. Try again.',
   '无法加载最近删除，请重试': 'Cannot load deleted content. Try again.',
   '恢复失败，请重试': 'Restore failed. Try again.',
+  '本机未发送的草稿和附件': 'Unsent drafts and attachments on this device',
+  '恢复草稿…': 'Recover draft…',
+  '目标会话已有草稿，请先发送或清空':
+      'The destination already has a draft. Send or clear it first.',
+  '待恢复内容': 'Pending recovery',
+  '已删除会话': 'Deleted conversation',
+  '恢复到哪里': 'Choose a destination',
+  '恢复为新会话': 'Restore as a new conversation',
+  '恢复…': 'Restore…',
+  '清空消息': 'Clear messages',
+  '清空': 'Clear',
+  '暂无待恢复内容': 'No content awaiting recovery',
+  '有 {count} 条待恢复内容': '{count} items awaiting recovery',
+  '这些消息来自已删除的会话。可移入现有会话，或恢复为独立会话。':
+      'These messages belong to deleted conversations. Move them into an existing conversation or restore them separately.',
+  '多个修改版本将一并恢复': 'All conflicting versions will be restored',
+  '附件尚未就绪，请同步后重试': 'The attachment is not ready. Sync and try again.',
+  '移至回收站': 'Move to recycle bin',
+  '无法加载待恢复内容，请重试': 'Cannot load pending recovery. Try again.',
+  '已恢复到会话': 'Restored to a conversation',
+  '恢复后会同步到已绑定设备。原会话已删除时，可选择恢复位置。':
+      'Restored content syncs to paired devices. Choose a destination if the original conversation was deleted.',
+  '已有消息及对应收藏将移至回收站。会话保留，可继续接收新消息。':
+      'Existing messages and their favorites move to the recycle bin. The conversation stays available for new messages.',
+  '会话和已有消息将在已绑定设备上删除。之后收到的离线新消息会保存在待恢复内容中。':
+      'The conversation and its existing messages will be deleted on paired devices. New messages arriving from offline devices will be kept in pending recovery.',
+  '目标会话已删除或不存在，请重新选择':
+      'The destination was deleted or is unavailable. Choose another conversation.',
+  '会话已删除，请选择其他会话发送':
+      'This conversation was deleted. Send to another conversation.',
 };

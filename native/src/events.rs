@@ -132,6 +132,7 @@ pub(super) fn apply_transaction(
         return Err("Unknown change type".into());
     }
     let body = serde_json::to_string(event)?;
+    if event_compaction::replay(tx, &event_id, &body)? { return Ok(false); }
     let existing: Option<String> = tx
         .query_row("SELECT body FROM events WHERE id=?", [&event_id], |r| {
             r.get(0)
@@ -171,7 +172,7 @@ pub(super) fn apply_transaction(
             let item_id = string(item, "id")?;
             let encoded = serde_json::to_string(&message_edits::edited_item(tx, item)?)?;
             let old: Option<String> = tx
-                .query_row("SELECT body FROM items WHERE id=?", [item_id], |r| r.get(0))
+                .query_row("SELECT body FROM items WHERE id=?1 UNION ALL SELECT body FROM conversation_recovery WHERE id=?1", [item_id], |r| r.get(0))
                 .optional()?;
             if old.as_ref().is_some_and(|v| v != &encoded) {
                 return Err(errors::api(
@@ -192,7 +193,11 @@ pub(super) fn apply_transaction(
             let sequence = tx.last_insert_rowid();
             // A tombstone always wins, even if an offline device replays an old item.
             if !deleted(&tx, item_id)? {
-                storage::insert_item(&tx, item_id, sequence, &encoded)?;
+                if conversation_recovery::closed(tx,item["conversationId"].as_str().unwrap_or("lanflow-self-chat"))? {
+                    conversation_recovery::insert(tx,item_id,sequence,&encoded)?;
+                } else {
+                    storage::insert_item(&tx, item_id, sequence, &encoded)?;
+                }
             }
             favorites::hydrate_source(tx, item_id)?;
         }
@@ -211,6 +216,8 @@ pub(super) fn apply_transaction(
                 "INSERT OR IGNORE INTO trash SELECT id,body,? FROM items WHERE id=?",
                 params![Utc::now().to_rfc3339(), target],
             )?;
+            tx.execute("INSERT OR IGNORE INTO trash SELECT id,body,? FROM conversation_recovery WHERE id=?", params![Utc::now().to_rfc3339(), target])?;
+            tx.execute("DELETE FROM conversation_recovery WHERE id=?", [&target])?;
             if !deleted(tx, &target)? {
                 favorites::archive_source(tx, &target)?;
             }
@@ -262,8 +269,16 @@ pub(super) fn apply_transaction(
                     return Err("Invalid conversation avatar color".into());
                 }
             }
-            tx.execute("INSERT INTO conversations VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,body=excluded.body WHERE excluded.revision>conversations.revision OR (excluded.revision=conversations.revision AND excluded.event_id>conversations.event_id)",
+            if conversation.get("deleted").is_some_and(|value| !value.is_boolean()) {
+                return Err("Invalid conversation deletion state".into());
+            }
+            // Deletion survives stale or concurrent name/avatar updates.
+            tx.execute("INSERT INTO conversations VALUES(?,?,?,?) ON CONFLICT(id) DO UPDATE SET revision=excluded.revision,event_id=excluded.event_id,body=CASE WHEN json_extract(conversations.body,'$.deleted')=1 THEN json_set(excluded.body,'$.deleted',json('true')) ELSE excluded.body END WHERE excluded.revision>conversations.revision OR (excluded.revision=conversations.revision AND excluded.event_id>conversations.event_id)",
                 params![owner,revision,event_id,serde_json::to_string(conversation)?])?;
+            if conversation["deleted"] == true {
+                tx.execute("UPDATE conversations SET body=json_set(body,'$.deleted',json('true')) WHERE id=? AND COALESCE(json_extract(body,'$.deleted'),0)!=1", [&owner])?;
+            }
+            conversation_recovery::quarantine(tx,&owner)?;
             tx.execute(
                 "INSERT INTO events(id,body) VALUES(?,?)",
                 params![event_id, body],
@@ -315,6 +330,18 @@ pub(super) fn apply_transaction(
         }
         _ => unreachable!(),
     }
+    let deleted_target = match kind {
+        "item" => event["item"]["id"].as_str(),
+        "edit" | "delete" => event["target"].as_str(),
+        "favorite" | "favorite_snapshot" => event["favorite"]["id"].as_str(),
+        _ => None,
+    };
+    if let Some(target) = deleted_target {
+        if deleted(tx,target)? { event_compaction::deleted_message(tx,target)?; }
+    }
+    if kind=="profile" || kind=="conversation" {
+        event_compaction::metadata(tx,kind,string(&event[kind],"id")?)?;
+    }
     if let Some(source) = source {
         tx.execute(
             "INSERT OR IGNORE INTO seen VALUES(?,?)",
@@ -351,22 +378,110 @@ pub(super) fn delete_many(root: &Path, db: &mut Connection, ids: &Value) -> Resu
     let tx = db.transaction()?;
     let link = favorites::linked(&tx)?;
     for target in targets {
-        let was_favorite: bool = tx.query_row(
-            "SELECT EXISTS(SELECT 1 FROM favorites WHERE id=? AND json_extract(body,'$.value')=1)",
+        delete_with_favorite(root, &tx, &target, link)?;
+    }
+    tx.commit()?;
+    Ok(())
+}
+
+pub(super) fn delete_conversation(root: &Path, db: &mut Connection, owner: &str, close: bool) -> Result<i64> {
+    let tx = db.transaction()?;
+    let maximum = tx.query_row(
+        "SELECT COALESCE(MAX(sequence),0) FROM items WHERE COALESCE(json_extract(body,'$.conversationId'),'lanflow-self-chat')=?",
+        [owner], |r| r.get(0),
+    )?;
+    let link = favorites::linked(&tx)?;
+    for target in history::conversation_ids(&tx, owner)? {
+        delete_with_favorite(root, &tx, &target, link)?;
+    }
+    if !close || owner=="lanflow-self-chat" {
+        tx.commit()?;
+        return Ok(maximum);
+    }
+    let previous: Option<String> = tx.query_row(
+        "SELECT body FROM conversations WHERE id=?", [owner], |r| r.get(0),
+    ).optional()?;
+    let mut conversation: Value = serde_json::from_str(previous.as_deref().unwrap_or("{}"))?;
+    conversation["id"] = json!(owner);
+    if conversation["name"].is_null() {
+        conversation["name"] = json!(if owner == "lanflow-self-chat" { "发给自己" } else { "同步中的会话" });
+    }
+    conversation["revision"] = json!(Utc::now().timestamp_micros().max(
+        conversation["revision"].as_i64().unwrap_or(0).saturating_add(1),
+    ));
+    conversation["deleted"] = json!(true);
+    let event = json!({"id":uuid::Uuid::new_v4().simple().to_string(),"type":"conversation","conversation":conversation});
+    apply_transaction(root, &tx, &event, None)?;
+    tx.commit()?;
+    Ok(maximum)
+}
+
+fn delete_with_favorite(root: &Path, tx: &Connection, target: &str, link: bool) -> Result<()> {
+    let was_favorite: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM favorites WHERE id=? AND json_extract(body,'$.value')=1)",
+        [&target],
+        |r| r.get(0),
+    )?;
+    favorites::hydrate_source(&tx, &target)?;
+    if link {
+        favorites::remove_original(&tx, &target)?;
+    }
+    delete_transaction(root, &tx, &target)?;
+    if was_favorite {
+        tx.execute(
+            "UPDATE trash SET body=json_set(body,'$._wasFavorite',json('true')) WHERE id=?",
             [&target],
-            |r| r.get(0),
         )?;
-        favorites::hydrate_source(&tx, &target)?;
-        if link {
-            favorites::remove_original(&tx, &target)?;
+    }
+    Ok(())
+}
+
+pub(super) fn forward_message(root: &Path, db: &mut Connection, request: &Value) -> Result<()> {
+    let source = id(request, "id")?;
+    let destination = id(request, "conversationId")?;
+    let tx = db.transaction()?;
+    let body: String = tx
+        .query_row("SELECT body FROM items WHERE id=?", [&source], |r| r.get(0))
+        .optional()?
+        .ok_or("消息已删除，无法转发")?;
+    let mut item: Value = serde_json::from_str(&body)?;
+    if item["conversationId"]
+        .as_str()
+        .unwrap_or("lanflow-self-chat")
+        == destination
+    {
+        return Err("请选择其他会话".into());
+    }
+    if destination != "lanflow-self-chat"
+        && !tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM conversations WHERE id=?)",
+            [&destination],
+            |r| r.get::<_, bool>(0),
+        )?
+    {
+        return Err("目标会话不存在".into());
+    }
+    if conversation_recovery::closed(&tx,&destination)? { return Err("目标会话已删除或不存在，请重新选择".into()); }
+    if message_edits::conflicted(&tx, &source)? {
+        return Err("请先选择或编辑这条消息的冲突版本".into());
+    }
+    if item["kind"] != "text" {
+        let path = attachments::item_path(&tx, &item)?.ok_or("文件尚未下载完成")?;
+        let metadata = fs::metadata(root.join(path)).map_err(|_| "文件尚未下载完成")?;
+        if !metadata.is_file() || Some(metadata.len()) != item["size"].as_u64() {
+            return Err("文件尚未下载完成".into());
         }
-        delete_transaction(root, &tx, &target)?;
-        if was_favorite {
-            tx.execute(
-                "UPDATE trash SET body=json_set(body,'$._wasFavorite',json('true')) WHERE id=?",
-                [&target],
-            )?;
-        }
+    }
+    item["id"] = json!(uuid::Uuid::new_v4().to_string());
+    item["createdAt"] = json!(chrono::Utc::now().to_rfc3339());
+    item["originId"] = json!(id(request, "originId")?);
+    item["originName"] = json!(string(request, "originName")?);
+    item["conversationId"] = json!(destination);
+    item.as_object_mut().unwrap().remove("editHeads");
+    validate_item(&item)?;
+    apply_transaction(root, &tx, &item_event(&item), None)?;
+    if request["cut"] == true {
+        delete_with_favorite(root, &tx, &source, favorites::linked(&tx)?)?;
     }
     tx.commit()?;
     Ok(())

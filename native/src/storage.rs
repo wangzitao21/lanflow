@@ -185,11 +185,17 @@ fn schema(db: &mut Connection, hub: bool) -> Result<()> {
         )?;
     }
     search::schema(&tx)?;
+    event_compaction::schema(&tx)?;
     favorites::schema(&tx)?;
+    conversation_recovery::schema(&tx)?;
     message_edits::schema(&tx)?;
     reconciliation::schema(&tx)?;
     history::schema(&tx)?;
     transfers::schema(&tx)?;
+    if !tx.query_row("SELECT EXISTS(SELECT 1 FROM meta WHERE key='history_compaction_v1')", [], |r| r.get::<_,bool>(0))? {
+        event_compaction::all(&tx)?;
+        tx.execute("INSERT INTO meta VALUES('history_compaction_v1','true')",[])?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -382,6 +388,7 @@ fn delta(db: &Connection, after: i64, revision: i64) -> Result<Value> {
     value["deleted"] = json!(deleted);
     value["history"] = history::summaries(db, Some(after))?;
     value["conflicts"] = message_edits::conflicts(db)?;
+    value["recoveryCount"] = json!(conversation_recovery::count(db)?);
     Ok(value)
 }
 
@@ -448,6 +455,7 @@ fn snapshot_content(db: &Connection, history: bool) -> Result<Value> {
     value["favorites"] = json!(favorites);
     value["conflicts"] = message_edits::conflicts(db)?;
     value["deleted"] = json!(tombstones);
+    value["recoveryCount"] = json!(conversation_recovery::count(db)?);
     value["revision"] =
         json!(db.query_row("SELECT value FROM revision", [], |r| r.get::<_, i64>(0))?);
     value["changeCursor"] = json!(change_cursor(db)?);

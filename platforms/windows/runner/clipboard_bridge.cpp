@@ -111,6 +111,110 @@ std::optional<std::vector<uint8_t>> ReadClipboardPng(HWND window) {
   return EncodeClipboardSnapshot(ReadClipboardSnapshot(window));
 }
 
+std::vector<std::string> ReadFileDrop(HDROP drop) {
+  if (!drop) throw std::runtime_error("Cannot read clipboard files");
+  const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+  if (count > 10000) throw std::runtime_error("Too many clipboard files");
+  std::vector<std::string> paths;
+  paths.reserve(count);
+  for (UINT index = 0; index < count; ++index) {
+    const UINT length = DragQueryFileW(drop, index, nullptr, 0);
+    if (!length || length > 32767) throw std::runtime_error("Invalid clipboard file path");
+    std::vector<wchar_t> path(length + 1);
+    if (DragQueryFileW(drop, index, path.data(), length + 1) != length) {
+      throw std::runtime_error("Cannot read clipboard file path");
+    }
+    const int size = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+        path.data(), static_cast<int>(length), nullptr, 0, nullptr, nullptr);
+    if (!size) throw std::runtime_error("Invalid clipboard file path");
+    std::string utf8(size, '\0');
+    if (!WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, path.data(),
+        static_cast<int>(length), utf8.data(), size, nullptr, nullptr)) {
+      throw std::runtime_error("Cannot decode clipboard file path");
+    }
+    paths.push_back(std::move(utf8));
+  }
+  return paths;
+}
+
+std::vector<std::string> ReadClipboardFiles(HWND window) {
+  if (!IsClipboardFormatAvailable(CF_HDROP)) return {};
+  if (!OpenClipboard(window)) throw std::runtime_error("Clipboard is busy; please paste again");
+  struct ClipboardLock { ~ClipboardLock() { CloseClipboard(); } } lock;
+  // Clipboard memory belongs to its owner; copy paths before releasing the lock.
+  return ReadFileDrop(static_cast<HDROP>(GetClipboardData(CF_HDROP)));
+}
+
+void WriteClipboardImage(HWND window, const std::vector<uint8_t>& png,
+                         const std::vector<uint8_t>& rgba, int width, int height) {
+  const auto pixels = static_cast<int64_t>(width) * height;
+  if (width <= 0 || height <= 0 || pixels > 16 * 1024 * 1024 ||
+      rgba.size() != static_cast<size_t>(pixels) * 4 || png.size() > kMaxBytes) {
+    throw std::runtime_error("Clipboard image is too large or invalid");
+  }
+  ValidatePngDimensions(png.data(), png.size());
+  using Memory = std::unique_ptr<void, decltype(&GlobalFree)>;
+  auto allocate = [](SIZE_T size) -> Memory {
+    auto handle = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, size);
+    if (!handle) throw std::runtime_error("Cannot allocate clipboard image");
+    return Memory(handle, GlobalFree);
+  };
+  auto png_data = allocate(png.size());
+  auto dib = allocate(sizeof(BITMAPV5HEADER) + rgba.size());
+  auto legacy = allocate(sizeof(BITMAPINFOHEADER) + rgba.size());
+  auto locked_png = GlobalLock(png_data.get());
+  if (!locked_png) throw std::runtime_error("Cannot access clipboard memory");
+  std::memcpy(locked_png, png.data(), png.size());
+  GlobalUnlock(png_data.get());
+  auto header = static_cast<BITMAPV5HEADER*>(GlobalLock(dib.get()));
+  if (!header) throw std::runtime_error("Cannot access clipboard memory");
+  header->bV5Size = sizeof(BITMAPV5HEADER);
+  header->bV5Width = width;
+  header->bV5Height = -height;
+  header->bV5Planes = 1;
+  header->bV5BitCount = 32;
+  header->bV5Compression = BI_BITFIELDS;
+  header->bV5SizeImage = static_cast<DWORD>(rgba.size());
+  header->bV5RedMask = 0x00FF0000;
+  header->bV5GreenMask = 0x0000FF00;
+  header->bV5BlueMask = 0x000000FF;
+  header->bV5AlphaMask = 0xFF000000;
+  header->bV5CSType = LCS_sRGB;
+  auto bgra = reinterpret_cast<uint8_t*>(header + 1);
+  for (size_t i = 0; i < rgba.size(); i += 4) {
+    bgra[i] = rgba[i + 2]; bgra[i + 1] = rgba[i + 1];
+    bgra[i + 2] = rgba[i]; bgra[i + 3] = rgba[i + 3];
+  }
+  GlobalUnlock(dib.get());
+  auto flat = static_cast<BITMAPINFOHEADER*>(GlobalLock(legacy.get()));
+  if (!flat) throw std::runtime_error("Cannot access clipboard memory");
+  flat->biSize = sizeof(BITMAPINFOHEADER);
+  flat->biWidth = width; flat->biHeight = -height;
+  flat->biPlanes = 1; flat->biBitCount = 32;
+  flat->biCompression = BI_RGB;
+  flat->biSizeImage = static_cast<DWORD>(rgba.size());
+  auto opaque = reinterpret_cast<uint8_t*>(flat + 1);
+  for (size_t i = 0; i < rgba.size(); i += 4) {
+    const unsigned alpha = rgba[i + 3];
+    for (size_t c = 0; c < 3; ++c) {
+      opaque[i + c] = static_cast<uint8_t>((rgba[i + 2 - c] * alpha + 255 * (255 - alpha) + 127) / 255);
+    }
+    opaque[i + 3] = 255;
+  }
+  GlobalUnlock(legacy.get());
+  const auto png_format = RegisterClipboardFormatW(L"PNG");
+  if (!png_format || !OpenClipboard(window)) throw std::runtime_error("Clipboard is busy");
+  struct ClipboardLock { ~ClipboardLock() { CloseClipboard(); } } lock;
+  if (!EmptyClipboard()) throw std::runtime_error("Cannot clear clipboard");
+  auto publish = [](UINT format, Memory& data) {
+    if (!SetClipboardData(format, data.get())) throw std::runtime_error("Cannot copy image to clipboard");
+    data.release();
+  };
+  publish(png_format, png_data);
+  publish(CF_DIBV5, dib);
+  publish(CF_DIB, legacy);
+}
+
 struct AsyncClipboard::State {
   std::mutex mutex;
   HWND owner;

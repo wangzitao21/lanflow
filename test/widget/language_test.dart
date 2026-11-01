@@ -96,6 +96,13 @@ void main() {
         await harness.inbox.store.flush();
       });
       await tester.pumpAndSettle();
+      await tester.scrollUntilVisible(
+        find.text('Language'), -80,
+        scrollable: find.descendant(
+          of: find.byKey(const PageStorageKey('preferences-form')),
+          matching: find.byType(Scrollable),
+        ),
+      );
       expect(find.text('Language'), findsOneWidget);
       expect(find.text('Preferences'), findsNWidgets(2));
       expect(find.text('English'), findsOneWidget);

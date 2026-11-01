@@ -125,8 +125,22 @@ class FavoriteDetailState extends State<FavoriteDetail> {
     final action = await showMessageActions(
       context: viewerContext,
       anchor: Rect.fromLTWH(point.dx, point.dy, 1, 1),
-      actions: const [MessageAction('save', '另存为', Icons.save_alt_outlined)],
+      actions: const [
+        MessageAction('copy', '复制图片', Icons.copy_outlined),
+        MessageAction('save', '另存为', Icons.save_alt_outlined),
+      ],
     );
+    if (mounted && action == 'copy') {
+      await _run(
+        () async {
+          await _actions.copy(_entry);
+          return true;
+        },
+        success: '已复制图片',
+        fallback: '复制图片失败，请重试',
+      );
+      return;
+    }
     if (!mounted || action != 'save') return;
     await _run(
       () => _actions.saveFile(_entry),
@@ -227,7 +241,16 @@ class FavoriteDetailState extends State<FavoriteDetail> {
                       return true;
                     }, success: '已复制'),
               icon: const Icon(Icons.content_copy_outlined, size: 18),
-              label: Text(tr(context, item.isFile ? '复制文件名' : '复制文字')),
+              label: Text(
+                tr(
+                  context,
+                  item.kind == MessageKind.image
+                      ? '复制图片'
+                      : item.isFile
+                      ? '复制文件名'
+                      : '复制文字',
+                ),
+              ),
             ),
             if (item.isFile) ...[
               TextButton.icon(

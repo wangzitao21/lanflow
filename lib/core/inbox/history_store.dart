@@ -176,12 +176,12 @@ extension HistoryStore on InboxStore {
         )
       : (conversationEntries[id] ?? []).map((entry) => entry.item.id).toList();
 
-  Future<int> removeConversation(String id) async {
+  Future<int> removeConversation(String id, {bool clearOnly = false}) async {
     final result = Map<String, dynamic>.from(
-      await _historyCall('delete_conversation', {
-            'conversationId': id,
-            'knownRevision': revision,
-          })
+      await _historyCall(
+            clearOnly ? 'clear_conversation' : 'delete_conversation',
+            {'conversationId': id, 'knownRevision': revision},
+          )
           as Map,
     );
     applySnapshot(result);

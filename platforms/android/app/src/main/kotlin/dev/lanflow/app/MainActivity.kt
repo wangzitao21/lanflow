@@ -3,6 +3,9 @@ package dev.lanflow.app
 import android.Manifest
 import android.app.Activity
 import android.content.Intent
+import android.content.ClipData
+import android.content.ClipboardManager
+import androidx.core.content.FileProvider
 import android.content.pm.PackageManager
 import android.os.Build
 import android.os.Bundle
@@ -327,6 +330,27 @@ class MainActivity : FlutterActivity() {
         channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "lanflow/platform")
         channel!!.setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "copyImage" -> {
+                        val bytes = call.arguments as? ByteArray
+                        exportWorker.execute {
+                            try {
+                                require(bytes != null && bytes.size in 8..(64 * 1024 * 1024))
+                                val folder = File(cacheDir, "clipboard").apply { mkdirs() }
+                                val image = File(folder, "${UUID.randomUUID()}.png")
+                                image.outputStream().use { it.write(bytes) }
+                                val uri = FileProvider.getUriForFile(this, "$packageName.clipboard", image)
+                                runOnUiThread {
+                                    try {
+                                        val clipboard = getSystemService(CLIPBOARD_SERVICE) as ClipboardManager
+                                        clipboard.setPrimaryClip(ClipData.newUri(contentResolver, "LanFlow", uri))
+                                        result.success(null)
+                                    } catch (e: Exception) { result.error("CLIPBOARD", e.message, null) }
+                                }
+                                val cutoff = System.currentTimeMillis() - 7L * 24 * 60 * 60 * 1000
+                                folder.listFiles()?.filter { it != image && it.lastModified() < cutoff }?.forEach { it.delete() }
+                            } catch (e: Exception) { runOnUiThread { result.error("CLIPBOARD", e.message, null) } }
+                        }
+                    }
                     "setLanguage" -> {
                         ReceiverService.updateState(this, language = if (call.arguments == "en") "en" else "zh")
                         result.success(null)

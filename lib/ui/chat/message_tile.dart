@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'message_link_preview.dart';
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
@@ -80,14 +81,20 @@ class MessageTile extends StatelessWidget {
         outgoing: local,
         textCursor: AppLayout.desktop(context),
         tailOffset: !local && showIdentity ? 12 : 20,
-        child: MessageText(
+        child: MessageLinkPreview(
+          key: ValueKey('link-preview-${item.id}'),
           text: item.text,
           highlightQuery: highlightQuery,
           onLink: onLink,
-          outgoing: local,
-          fontSize: ChatMetrics.messageFontSize,
-          selectable: AppLayout.desktop(context),
-          onSelectionChanged: onSelectionChanged,
+          fallback: MessageText(
+            text: item.text,
+            highlightQuery: highlightQuery,
+            onLink: onLink,
+            outgoing: local,
+            fontSize: ChatMetrics.messageFontSize,
+            selectable: AppLayout.desktop(context),
+            onSelectionChanged: onSelectionChanged,
+          ),
         ),
       );
     } else if (item.kind == MessageKind.image) {

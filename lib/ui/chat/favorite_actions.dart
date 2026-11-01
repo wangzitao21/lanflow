@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:lanflow/core/files/message_export.dart';
 import 'package:lanflow/core/inbox/inbox_controller.dart';
 import 'package:lanflow/core/inbox/inbox_models.dart';
+import 'package:lanflow/core/network/models.dart';
 import 'package:lanflow/platform/platform_bridge.dart';
 
 class FavoriteActions {
@@ -12,9 +13,18 @@ class FavoriteActions {
   final InboxController inbox;
   final Future<void> Function(File file)? openAttachment;
 
-  Future<void> copy(FavoriteEntry entry) => Clipboard.setData(
-    ClipboardData(text: entry.item.isFile ? entry.item.name : entry.item.text),
-  );
+  Future<void> copy(FavoriteEntry entry) async {
+    if (entry.item.kind == MessageKind.image) {
+      final file = await inbox.favoriteFileForExport(entry);
+      await PlatformBridge.copyImage(file.path);
+      return;
+    }
+    await Clipboard.setData(
+      ClipboardData(
+        text: entry.item.isFile ? entry.item.name : entry.item.text,
+      ),
+    );
+  }
 
   Future<void> openFile(FavoriteEntry entry) async {
     final file = await inbox.favoriteFileForOpening(entry);

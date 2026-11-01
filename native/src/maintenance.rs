@@ -68,7 +68,7 @@ pub(super) fn trash_page(root: &Path, db: &Connection, request: &Value) -> Resul
     Ok(json!({"items":items,"total":total,"more":more,"cursor":cursor}))
 }
 
-pub(super) fn restore(root: &Path, db: &mut Connection, target: &str) -> Result<()> {
+pub(super) fn restore(root: &Path, db: &mut Connection, target: &str, destination: Option<&str>) -> Result<()> {
     let body: Option<String> = db
         .query_row("SELECT body FROM trash WHERE id=?", [target], |r| r.get(0))
         .optional()?;
@@ -85,6 +85,10 @@ pub(super) fn restore(root: &Path, db: &mut Connection, target: &str) -> Result<
     }
     item["id"] = json!(restored);
     let tx=db.transaction()?;
+    let old=item["conversationId"].as_str().unwrap_or("lanflow-self-chat");
+    if destination.is_some() || conversation_recovery::closed(&tx,old)? {
+        item["conversationId"]=json!(conversation_recovery::destination(root,&tx,old,destination)?);
+    }
     let existing: Option<String> = tx.query_row("SELECT body FROM items WHERE id=?",[string(&item,"id")?],|r| r.get(0)).optional()?;
     let item=if let Some(existing)=existing { events::normalize_item(&serde_json::from_str::<Value>(&existing)?)? } else {
         let item=events::normalize_item(&item)?;

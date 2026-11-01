@@ -8,6 +8,8 @@ import 'package:lanflow/ui/shared/user_feedback.dart';
 import 'package:lanflow/ui/shared/app_feedback.dart';
 import 'package:lanflow/ui/shared/app_strings.dart';
 import 'package:lanflow/ui/shared/app_dialogs.dart';
+import 'package:lanflow/ui/chat/recovery_destination_dialog.dart';
+import 'conversation_recovery_panel.dart';
 
 class RecentlyDeletedPanel extends StatefulWidget {
   const RecentlyDeletedPanel({
@@ -176,9 +178,28 @@ class _RecentlyDeletedPanelState extends State<RecentlyDeletedPanel> {
       _notice = null;
     });
     try {
-      await widget.inbox.restoreDeleted(item);
+      String? destination;
+      final closed =
+          item.item.conversationId != defaultConversationId &&
+          widget.inbox.store.conversations[item.item.conversationId]?.deleted ==
+              true;
+      if (closed && !item.isFavorite) {
+        final selected = await showDialog<String>(
+          context: context,
+          builder: (_) => RecoveryDestinationDialog(inbox: widget.inbox),
+        );
+        if (!mounted || selected == null) return;
+        destination = selected.isEmpty ? null : selected;
+      }
+      await widget.inbox.restoreDeleted(item, conversation: destination);
       if (mounted) {
-        setState(() => _notice = item.isFavorite ? '已恢复到收藏' : '已恢复到原会话');
+        setState(
+          () => _notice = item.isFavorite
+              ? '已恢复到收藏'
+              : closed
+              ? '已恢复到会话'
+              : '已恢复到原会话',
+        );
         await _load();
       }
     } on Object catch (error) {
@@ -272,7 +293,7 @@ class _RecentlyDeletedPanelState extends State<RecentlyDeletedPanel> {
     final content = Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        Text(tr(context, '恢复后会回到原位置，并同步到已绑定设备。')),
+        Text(tr(context, '恢复后会同步到已绑定设备。原会话已删除时，可选择恢复位置。')),
         const SizedBox(height: 12),
         TextField(
           key: const ValueKey('trash-search'),
@@ -353,6 +374,16 @@ class _RecentlyDeletedPanelState extends State<RecentlyDeletedPanel> {
       ],
     );
     final actions = [
+      TextButton(
+        key: const ValueKey('open-conversation-recovery'),
+        onPressed: _clearing
+            ? null
+            : () => showDialog<void>(
+                context: context,
+                builder: (_) => ConversationRecoveryPanel(inbox: widget.inbox),
+              ),
+        child: Text(tr(context, '待恢复内容')),
+      ),
       TextButton.icon(
         key: const ValueKey('empty-local-trash'),
         onPressed:

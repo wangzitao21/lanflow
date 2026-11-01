@@ -38,6 +38,7 @@ class InboxStore {
   int favoritesRevision = 0;
   int profilesRevision = 0;
   int conversationsRevision = 0;
+  int recoveryCount = 0;
   final Map<String, int> maxConversationSequence = {};
   final Map<String, String> _blobPaths = {};
   final Map<String, SyncCursor> cursors = {};
@@ -47,6 +48,8 @@ class InboxStore {
   String currentConversation = defaultConversationId;
   String appearance = 'light';
   String language = 'zh';
+  bool mergedCopyNumbered = false;
+  bool cutForward = true;
   double composerFraction = .24;
   final Map<String, String> drafts = {};
   final Map<String, MessageQuote> draftQuotes = {};
@@ -101,6 +104,8 @@ class InboxStore {
   void _appearance(Map state) {
     linkFavoriteDeletion = true;
     language = state['language'] == 'en' ? 'en' : 'zh';
+    mergedCopyNumbered = state['mergedCopyNumbered'] == true;
+    cutForward = state['cutForward'] != false;
     final value = state['appearance'];
     appearance = const {'light', 'dark', 'system'}.contains(value)
         ? value as String
@@ -265,6 +270,7 @@ class InboxStore {
     }
     final incomingRevision = state['revision'] as int? ?? 0;
     if (incomingRevision <= revision || state['unchanged'] == true) return;
+    recoveryCount = state['recoveryCount'] as int? ?? recoveryCount;
     if (state['conflicts'] is List) {
       conflicts
         ..clear()
@@ -670,19 +676,57 @@ class InboxStore {
     ),
   );
 
-  Future<void> restore(String id, {String source = 'conversation'}) async =>
-      applySnapshot(
-        Map<String, dynamic>.from(
-          await NativeCore.run({
-                'op': 'restore',
-                'root': directory.path,
-                'id': id,
-                'source': source,
-                'knownRevision': revision,
-              })
-              as Map,
-        ),
-      );
+  Future<void> restore(
+    String id, {
+    String source = 'conversation',
+    String? conversation,
+  }) async => applySnapshot(
+    Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'restore',
+            'root': directory.path,
+            'id': id,
+            'source': source,
+            'conversationId': ?conversation,
+            'knownRevision': revision,
+          })
+          as Map,
+    ),
+  );
+
+  Future<Map<String, dynamic>> recoveryPage({
+    Map<String, dynamic>? after,
+  }) async {
+    final page = Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'recovery_page',
+            'root': directory.path,
+            'after': after,
+          })
+          as Map,
+    );
+    for (final row in page['items'] as List) {
+      if (row['blobPath'] is String) {
+        _readBlobPaths({row['item']['sha256']: row['blobPath']});
+      }
+    }
+    return page;
+  }
+
+  Future<String?> recoverMessage(String id, {String? conversation}) async {
+    final result = Map<String, dynamic>.from(
+      await NativeCore.run({
+            'op': 'recover_message',
+            'root': directory.path,
+            'id': id,
+            'conversationId': ?conversation,
+            'knownRevision': revision,
+          })
+          as Map,
+    );
+    applySnapshot(result);
+    return result['restoredConversationId'] as String?;
+  }
 
   Future<Map<String, dynamic>> storageStats({
     bool clearPreviews = false,
@@ -786,6 +830,22 @@ class InboxStore {
       old
         ..avatar = null
         ..avatarColor = null;
+      changed = true;
+    }
+    if (changed) await save();
+  }
+
+  Future<void> migrateConversationDeletions() async {
+    var changed = false;
+    for (final entry in conversationPreferences.entries.toList()) {
+      if (entry.value.hiddenThrough == null) continue;
+      // Older releases only hid the conversation on this device. Publish that
+      // intent for empty conversations without touching any newer messages.
+      if (latestIn(entry.key) == null &&
+          conversations[entry.key]?.deleted != true) {
+        await removeConversation(entry.key);
+      }
+      entry.value.hiddenThrough = null;
       changed = true;
     }
     if (changed) await save();
@@ -1017,6 +1077,8 @@ class InboxStore {
         'conversationOrder': List<String>.of(conversationOrder),
         'appearance': appearance,
         'language': language,
+        'mergedCopyNumbered': mergedCopyNumbered,
+        'cutForward': cutForward,
         'linkFavoriteDeletion': linkFavoriteDeletion,
         'favoritePreferences': favoritePreferences.toJson(),
         'composerFraction': composerFraction,

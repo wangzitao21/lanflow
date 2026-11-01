@@ -190,6 +190,9 @@ class InboxController extends ChangeNotifier {
     final ordered = {...store.conversationOrder, ...all.keys}.toList();
     final ranks = {for (var i = 0; i < ordered.length; i++) ordered[i]: i};
     return all.values.where((conversation) {
+      if (conversation.deleted && conversation.id != defaultConversationId) {
+        return false;
+      }
       final hidden = store.preference(conversation.id).hiddenThrough;
       return hidden == null ||
           (store.maxConversationSequence[conversation.id] ?? 0) > hidden;
@@ -406,23 +409,111 @@ class InboxController extends ChangeNotifier {
     _changed();
   }
 
-  Future<void> deleteConversation(String id) => _trackLocal(() async {
-    final through = await store.removeConversation(id);
-    final preference = store.preference(id);
-    preference.hiddenThrough = through;
-    preference.pinnedAt = null;
-    preference.manualUnread = false;
-    store.drafts.remove(id);
-    store.draftQuotes.remove(id);
-    store.attachmentDrafts.remove(id);
-    if (conversationId == id) {
-      store.currentConversation =
-          conversations.firstOrNull?.id ?? defaultConversationId;
-    }
-    await store.save();
+  Future<void> deleteConversation(String id) => id == defaultConversationId
+      ? clearConversation(id)
+      : _trackLocal(() async {
+          await store.removeConversation(id);
+          final preference = store.preference(id);
+          preference.hiddenThrough = null;
+          preference.pinnedAt = null;
+          preference.manualUnread = false;
+          store.drafts.remove(id);
+          store.draftQuotes.remove(id);
+          store.attachmentDrafts.remove(id);
+          if (conversationId == id) {
+            store.currentConversation =
+                conversations.firstOrNull?.id ?? defaultConversationId;
+          }
+          await store.save();
+          _changed();
+          if (automaticSync) requestSync();
+        });
+
+  Future<void> clearConversation(String id) => _trackLocal(() async {
+    await store.removeConversation(id, clearOnly: true);
     _changed();
     if (automaticSync) requestSync();
   });
+
+  Future<void> recoverMessage(RecoveryItem item, {String? conversation}) =>
+      _trackLocal(() async {
+        if (item.item.isFile) await store.fileForExport(item.item);
+        await store.recoverMessage(item.item.id, conversation: conversation);
+        _changed();
+        if (automaticSync) requestSync(immediate: true);
+      });
+
+  Future<void> discardRecovery(RecoveryItem item) => _trackLocal(() async {
+    await store.remove(item.item.id);
+    _changed();
+    if (automaticSync) requestSync(immediate: true);
+  });
+
+  List<String> get recoveryDrafts =>
+      {...store.drafts.keys, ...store.attachmentDrafts.keys}
+          .where(
+            (id) =>
+                id != defaultConversationId &&
+                store.conversations[id]?.deleted == true &&
+                ((store.drafts[id]?.trim().isNotEmpty ?? false) ||
+                    (store.attachmentDrafts[id]?.isNotEmpty ?? false)),
+          )
+          .toList();
+
+  int get recoveryCount => store.recoveryCount + recoveryDrafts.length;
+
+  Future<void> recoverDraft(String id, {String? conversation}) =>
+      _trackLocal(() async {
+        if (!recoveryDrafts.contains(id)) return;
+        _draftTimer?.cancel();
+        final target = conversation ?? randomToken(18);
+        if (conversation != null && !conversations.any((c) => c.id == target)) {
+          throw const FormatException('目标会话已删除或不存在，请重新选择');
+        }
+        if ((store.drafts[target]?.isNotEmpty ?? false) ||
+            (store.attachmentDrafts[target]?.isNotEmpty ?? false)) {
+          throw const FormatException('目标会话已有草稿，请先发送或清空');
+        }
+        if (conversation == null) await store.setConversation(target, '恢复的草稿');
+        final text = store.drafts.remove(id);
+        final quote = store.draftQuotes.remove(id);
+        final files = store.attachmentDrafts.remove(id);
+        final oldText = store.drafts[target];
+        final oldQuote = store.draftQuotes[target];
+        final oldFiles = store.attachmentDrafts[target];
+        store.drafts[target] = text ?? '';
+        if (quote != null) store.draftQuotes[target] = quote;
+        store.attachmentDrafts[target] = [
+          for (final item in files ?? <InboxItem>[])
+            InboxItem.fromJson({...item.toJson(), 'conversationId': target}),
+        ];
+        try {
+          await store.save();
+        } on Object {
+          if (text != null) store.drafts[id] = text;
+          if (quote != null) store.draftQuotes[id] = quote;
+          if (files != null) store.attachmentDrafts[id] = files;
+          if (oldText == null) {
+            store.drafts.remove(target);
+          } else {
+            store.drafts[target] = oldText;
+          }
+          if (oldQuote == null) {
+            store.draftQuotes.remove(target);
+          } else {
+            store.draftQuotes[target] = oldQuote;
+          }
+          if (oldFiles == null) {
+            store.attachmentDrafts.remove(target);
+          } else {
+            store.attachmentDrafts[target] = oldFiles;
+          }
+          rethrow;
+        }
+        selectConversation(target);
+        _changed();
+        if (automaticSync) requestSync();
+      });
 
   Future<Conversation> createConversation(String name) => _trackLocal(() async {
     final value = name.trim();
@@ -456,6 +547,47 @@ class InboxController extends ChangeNotifier {
     store.composerFraction = value.clamp(.18, .6);
     await store.save();
   }
+
+  Future<void> setMessagePreferences({
+    bool? mergedCopyNumbered,
+    bool? cutForward,
+  }) => _trackLocal(() async {
+    final previousNumbered = store.mergedCopyNumbered;
+    final previousCut = store.cutForward;
+    store.mergedCopyNumbered = mergedCopyNumbered ?? previousNumbered;
+    store.cutForward = cutForward ?? previousCut;
+    try {
+      await store.save();
+    } on Object {
+      store.mergedCopyNumbered = previousNumbered;
+      store.cutForward = previousCut;
+      rethrow;
+    } finally {
+      _changed();
+    }
+  });
+
+  Future<void> forwardMessage(
+    InboxItem item,
+    String destination, {
+    bool? cut,
+  }) => _trackLocal(() async {
+    if (!ready || !lan.ready) throw StateError('请等待本机收件箱启动完成');
+    if (item.isFile) await store.fileForExport(item);
+    final snapshot = await NativeCore.run({
+      'op': 'forward_message',
+      'root': store.directory.path,
+      'id': item.id,
+      'conversationId': destination,
+      'originId': lan.identity.id,
+      'originName': lan.name,
+      'cut': cut ?? store.cutForward,
+      'knownRevision': store.revision,
+    });
+    store.applySnapshot(Map<String, dynamic>.from(snapshot as Map));
+    _changed();
+    if (automaticSync) requestSync(immediate: true);
+  });
 
   Future<void> setLanguage(String value) async {
     await _awaitLoaded();
@@ -634,11 +766,16 @@ class InboxController extends ChangeNotifier {
   Future<File> favoriteFileForExport(FavoriteEntry entry) =>
       store.fileForExport(entry.item);
 
-  Future<void> restoreDeleted(DeletedItem entry) => _trackLocal(() async {
-    await store.restore(entry.id, source: entry.source);
-    _changed();
-    if (automaticSync) requestSync();
-  });
+  Future<void> restoreDeleted(DeletedItem entry, {String? conversation}) =>
+      _trackLocal(() async {
+        await store.restore(
+          entry.id,
+          source: entry.source,
+          conversation: conversation,
+        );
+        _changed();
+        if (automaticSync) requestSync();
+      });
 
   Map<String, Object> diagnostics() {
     const categories = {
@@ -1219,6 +1356,8 @@ class InboxController extends ChangeNotifier {
         },
       );
       if (_closed) return;
+      await store.migrateConversationDeletions();
+      if (_closed) return;
       await store.migrateConversationAvatars();
       if (_closed) return;
       if (_ensureConversationOrder()) await store.save();
@@ -1721,6 +1860,13 @@ class InboxController extends ChangeNotifier {
 
   void _changed() {
     if (!_closed) {
+      if (ready &&
+          store.conversations[conversationId]?.deleted == true &&
+          conversationId != defaultConversationId) {
+        store.currentConversation =
+            conversations.firstOrNull?.id ?? defaultConversationId;
+        readingConversation = null;
+      }
       if (ready && store.loaded && _ensureConversationOrder()) {
         unawaited(
           store.save().catchError((Object e) => reportError('会话顺序保存失败：$e')),

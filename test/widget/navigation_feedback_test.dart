@@ -155,13 +155,12 @@ void main() {
       final row = find.byKey(
         const ValueKey('conversation-$defaultConversationId'),
       );
-      final hold = await tester.startGesture(tester.getCenter(row));
-      await tester.pump(const Duration(milliseconds: 351));
+      await tester.tap(find.byKey(const ValueKey('conversation-menu-$defaultConversationId')));
+      await tester.pumpAndSettle();
       expect(
         find.byKey(const ValueKey('conversation-action-palette')),
         findsOneWidget,
       );
-      await hold.up();
       await tester.pumpAndSettle();
       expect(find.byKey(const ValueKey('desktop-context-menu')), findsNothing);
       expect(
@@ -175,13 +174,13 @@ void main() {
         find.byKey(const ValueKey('conversation-action-palette')),
         findsNothing,
       );
-      await tester.longPress(row);
+      await tester.tap(find.byKey(const ValueKey('conversation-menu-$defaultConversationId')));
       await tester.pumpAndSettle();
       await tester.tap(
         find.byKey(const ValueKey('touch-menu-deleteConversation')),
       );
       await tester.pumpAndSettle();
-      final delete = find.widgetWithText(FilledButton, '删除');
+      final delete = find.widgetWithText(FilledButton, '清空');
       expect(
         tester.widget<FilledButton>(delete).style!.backgroundColor!.resolve({}),
         Theme.of(tester.element(delete)).colorScheme.error,

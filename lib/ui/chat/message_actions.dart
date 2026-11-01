@@ -23,31 +23,41 @@ class MessageAction {
 
 /// A short, cancellable hold; scrolling still wins the gesture arena.
 class MessageHold extends StatelessWidget {
-  const MessageHold({super.key, required this.child, required this.onHold});
+  const MessageHold({
+    super.key,
+    required this.child,
+    required this.onHold,
+    this.enabled = true,
+  });
   final Widget child;
+  final bool enabled;
   final void Function(Offset, Rect) onHold;
   @override
-  Widget build(BuildContext context) => Builder(
-    builder: (anchor) => RawGestureDetector(
-      behavior: HitTestBehavior.opaque,
-      gestures: {
-        LongPressGestureRecognizer:
-            GestureRecognizerFactoryWithHandlers<LongPressGestureRecognizer>(
-              () => LongPressGestureRecognizer(
-                duration: const Duration(milliseconds: 350),
-              ),
-              (recognizer) => recognizer.onLongPressStart = (event) {
-                final box = anchor.findRenderObject()! as RenderBox;
-                onHold(
-                  event.globalPosition,
-                  box.localToGlobal(Offset.zero) & box.size,
-                );
-              },
-            ),
-      },
-      child: child,
-    ),
-  );
+  Widget build(BuildContext context) => !enabled
+      ? child
+      : Builder(
+          builder: (anchor) => RawGestureDetector(
+            behavior: HitTestBehavior.opaque,
+            gestures: {
+              LongPressGestureRecognizer:
+                  GestureRecognizerFactoryWithHandlers<
+                    LongPressGestureRecognizer
+                  >(
+                    () => LongPressGestureRecognizer(
+                      duration: const Duration(milliseconds: 350),
+                    ),
+                    (recognizer) => recognizer.onLongPressStart = (event) {
+                      final box = anchor.findRenderObject()! as RenderBox;
+                      onHold(
+                        event.globalPosition,
+                        box.localToGlobal(Offset.zero) & box.size,
+                      );
+                    },
+                  ),
+            },
+            child: child,
+          ),
+        );
 }
 
 Future<String?> showMessageActions({

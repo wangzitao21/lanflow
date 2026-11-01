@@ -178,7 +178,12 @@ class _DesktopMenuState extends State<DesktopActionMenu> {
         widget.actions.length * 38.0 +
         10 +
         (widget.actions.any((a) => a.destructive) ? 9 : 0);
-    final left = widget.position.dx.clamp(8.0, screen.width - width - 8);
+    // Leave the pointer column free so a second right click can reach a nearby
+    // message even when a taller menu has to shift upwards to fit the window.
+    final preferredLeft = widget.position.dx + width + 16 <= screen.width
+        ? widget.position.dx + 8
+        : widget.position.dx - width - 8;
+    final left = preferredLeft.clamp(8.0, screen.width - width - 8);
     final top = widget.position.dy.clamp(
       8.0,
       math.max(8.0, screen.height - height - 8),

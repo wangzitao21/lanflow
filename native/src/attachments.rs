@@ -420,7 +420,7 @@ pub(super) fn item_path(db: &Connection, item: &Value) -> Result<Option<String>>
 
 fn organization_items(db: &Connection) -> Result<Vec<Value>> {
     let bodies = db
-        .prepare("SELECT body FROM items WHERE json_extract(body,'$.kind')!='text' UNION SELECT body FROM trash WHERE json_extract(body,'$.kind')!='text' UNION SELECT json_extract(body,'$.item') FROM favorites WHERE json_extract(body,'$.value')=1 AND json_extract(body,'$.item.kind')!='text' UNION SELECT body FROM favorite_trash WHERE json_extract(body,'$.kind')!='text'")?
+        .prepare("SELECT body FROM items WHERE json_extract(body,'$.kind')!='text' UNION SELECT body FROM trash WHERE json_extract(body,'$.kind')!='text' UNION SELECT body FROM conversation_recovery WHERE json_extract(body,'$.kind')!='text' UNION SELECT json_extract(body,'$.item') FROM favorites WHERE json_extract(body,'$.value')=1 AND json_extract(body,'$.item.kind')!='text' UNION SELECT body FROM favorite_trash WHERE json_extract(body,'$.kind')!='text'")?
         .query_map([], |r| r.get::<_, String>(0))?
         .collect::<std::result::Result<Vec<_>, _>>()?;
     let mut items = bodies
